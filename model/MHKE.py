@@ -128,15 +128,26 @@ class MHKE_E2TC(nn.Module):
             # 添加位置编码
             tgt_emb = self.cap_pos_encoding(tgt_emb)
             
-            # 生成 Causal Mask (防止看到未来的token)
+            # 🔧 关键修复：生成 Causal Mask (防止看到未来的token)
             seq_len = tgt_emb.size(1)
             tgt_mask = nn.Transformer.generate_square_subsequent_mask(seq_len).to(self.device)
+            
+            # 🔧 关键修复：生成 Padding Mask (防止 Attention 关注 padding token)
+            # tgt_key_padding_mask: [Batch, Seq_Len], True 表示该位置是 padding
+            # 获取 tokenizer 的 pad_token_id
+            if hasattr(self.nlp_model.config, 'pad_token_id'):
+                pad_token_id = self.nlp_model.config.pad_token_id
+            else:
+                pad_token_id = 0  # 默认 padding token id
+            
+            tgt_key_padding_mask = (cap_input_ids == pad_token_id)  # [Batch, Seq_Len]
             
             # Transformer Decoder: tgt=文字, memory=图像序列特征
             decoder_out = self.caption_decoder(
                 tgt=tgt_emb,
                 memory=image_seq_feats,
-                tgt_mask=tgt_mask
+                tgt_mask=tgt_mask,
+                tgt_key_padding_mask=tgt_key_padding_mask  # 🔧 添加 padding mask
             )
             
             # 预测词表概率
