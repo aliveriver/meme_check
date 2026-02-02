@@ -75,6 +75,19 @@ class MemeDataset(Dataset):
 
         image_tensor = image_inputs["pixel_values"].squeeze()
 
+        # --- E2TC: 准备图像描述监督标签 ---
+        # 使用 meme_discription_input_ids 作为 decoder 的输入和标签
+        # cap_input_ids: decoder输入 (用于 Teacher Forcing)
+        # cap_labels: decoder目标 (用于计算Loss，padding部分设为-100)
+        cap_input_ids = meme_discription_input_ids.clone()
+        cap_labels = meme_discription_input_ids.clone()
+        # PyTorch CrossEntropyLoss 会忽略标签为 -100 的位置
+        if self.model_name == "clip":
+            pad_token_id = self.processor.tokenizer.pad_token_id
+        else:
+            pad_token_id = self.tokenizer.pad_token_id
+        cap_labels[cap_labels == pad_token_id] = -100
+
         return dict(
             input_ids=input_ids,
             attention_mask=attention_mask,
@@ -85,7 +98,10 @@ class MemeDataset(Dataset):
             image_tensor=image_tensor,
             label=label,
             type_label=type_label,
-            modal=modal
+            modal=modal,
+            # E2TC 新增字段
+            cap_input_ids=cap_input_ids,
+            cap_labels=cap_labels
         )
 
 

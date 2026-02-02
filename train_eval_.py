@@ -32,6 +32,9 @@ def train(config, train_iter, dev_iter):
         model = RobertaClassifier(config).to(config.device)
     elif config.model_name == "bert":
         model = BertClassifier(config).to(config.device)
+    elif config.model_name == "MHKE-E2TC":
+        # 使用带E2TC监督模块的MHKE模型
+        model = MHKE_E2TC(config).to(config.device)
     elif config.model_name == "MHKE":
         model = MHKE(config).to(config.device)
 
@@ -55,6 +58,13 @@ def train(config, train_iter, dev_iter):
             model.parameters(), lr=config.learning_rate)
 
     loss_fn = nn.BCEWithLogitsLoss()
+    # E2TC: 为caption生成任务添加CrossEntropyLoss (忽略padding)
+    cap_loss_fn = nn.CrossEntropyLoss(ignore_index=-100)
+    
+    # 是否使用E2TC
+    use_e2tc = (config.model_name == "MHKE-E2TC")
+    e2tc_weight = config.e2tc_weight if hasattr(config, 'e2tc_weight') else 1.0
+    
     max_score = 0
 
     for epoch in range(config.num_epochs):
@@ -62,33 +72,71 @@ def train(config, train_iter, dev_iter):
         start_time = time.time()
         print("Model is training in epoch {}".format(epoch))
         loss_all = 0.
+        loss_cls_all = 0.
+        loss_cap_all = 0.
         preds = []
         labels = []
 
         for batch in tqdm(train_iter, desc='Training', colour='MAGENTA'):
             model.zero_grad()
-            # print(batch)
-            logit = model(**batch).cpu()
+            
+            # 前向传播
+            if use_e2tc:
+                # E2TC模型返回 (cls_logits, cap_logits)
+                cls_logits, cap_logits = model(**batch)
+                cls_logits = cls_logits.cpu()
+            else:
+                # 原始模型只返回 cls_logits
+                cls_logits = model(**batch).cpu()
+                cap_logits = None
 
             if config.task_name == "task_1":
                 label = batch['label']
-                pred = get_preds(config, logit)
+                pred = get_preds(config, cls_logits)
             else:
                 label = batch['type_label']
-                pred = get_preds_task2(config, logit)
-            loss = loss_fn(logit, label.float())
+                pred = get_preds_task2(config, cls_logits)
+            
+            # 1. 计算分类 Loss (主任务)
+            loss_cls = loss_fn(cls_logits, label.float())
+            
+            # 2. 计算描述生成 Loss (辅助任务)
+            loss_cap = 0.0
+            if use_e2tc and cap_logits is not None:
+                cap_labels = batch['cap_labels'].to(config.device)
+                # Reshape: [Batch*Seq, Vocab] vs [Batch*Seq]
+                vocab_size = cap_logits.size(-1)
+                loss_cap = cap_loss_fn(
+                    cap_logits.view(-1, vocab_size),
+                    cap_labels.view(-1)
+                )
+                loss_cap_all += loss_cap.item()
+            
+            # 3. 联合 Loss (E2TC 论文思想)
+            if use_e2tc and isinstance(loss_cap, torch.Tensor):
+                total_loss = loss_cls + (e2tc_weight * loss_cap)
+            else:
+                total_loss = loss_cls
 
             preds.extend(pred)
             labels.extend(label.detach().numpy())
 
-            loss_all += loss.item()
+            loss_all += total_loss.item()
+            loss_cls_all += loss_cls.item()
+            
             model_optimizer.zero_grad()
-            loss.backward()
+            total_loss.backward()
             model_optimizer.step()
 
         end_time = time.time()
         print(" took: {:.1f} min".format((end_time - start_time)/60.))
         print("TRAINED for {} epochs".format(epoch))
+        
+        # 打印E2TC的loss信息
+        if use_e2tc:
+            print("Epoch {} - Cls Loss: {:.4f}, Cap Loss: {:.4f}, Total Loss: {:.4f}".format(
+                epoch, loss_cls_all/len(train_iter), loss_cap_all/len(train_iter), loss_all/len(train_iter)
+            ))
 
         # 验证
         if epoch >= config.num_warm:
@@ -112,10 +160,22 @@ def eval(config, model, loss_fn, dev_iter, data_name='DEV'):
     loss_all = 0.
     preds = []
     labels = []
+    
+    # 检查模型类型
+    use_e2tc = isinstance(model, MHKE_E2TC)
 
     for batch in tqdm(dev_iter, desc='Evaling', colour='CYAN'):
         with torch.no_grad():
-            logit = model(**batch).cpu()
+            # 前向传播
+            if use_e2tc:
+                # E2TC模型在eval时不需要计算caption loss
+                # 设置training=False避免生成caption
+                batch_eval = {k: v for k, v in batch.items()}
+                batch_eval['training'] = False
+                cls_logits, _ = model(**batch_eval)
+                logit = cls_logits.cpu()
+            else:
+                logit = model(**batch).cpu()
 
             if config.task_name == "task_1":
                 label = batch['label']

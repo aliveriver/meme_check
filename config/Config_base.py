@@ -59,6 +59,9 @@ class Config_base(object):
         self.dropout = 0.5                                              # 随机失活
         self.fc_hidden_dim = 256
         self.weight = 0.5
+        
+        # E2TC: 图像描述监督模块参数
+        self.e2tc_weight = 1.0                                          # E2TC caption loss权重
 
         # train
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')   # 设备
