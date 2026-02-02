@@ -1,2 +1,17 @@
 /data
 /meme
+/models
+
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+*.so
+
+
+AccessKey.csv
+AutoPanel 2026-02-02.txt
+
+*.gz
+*.tar
+*.zip
