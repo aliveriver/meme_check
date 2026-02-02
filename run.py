@@ -18,10 +18,38 @@ from model.MHKE import *
 
 if __name__ == '__main__':
 
-    model_name = "clip"
+    # ============================================
+    # 模型选择
+    # ============================================
+    # 基础模型
+    # model_name = "clip"
     # model_name = "vit-roberta"
-    task_name = "task_2"
+    # model_name = "MHKE"
+    
+    # E2TC 增强模型（推荐）
+    model_name = "MHKE-E2TC"
+    
+    # 任务选择
+    task_name = "task_1"  # task_1: 二分类, task_2: 多分类
+    
     config = Config_base(model_name, task_name)
+    
+    # ============================================
+    # E2TC 超参数配置（仅当使用 MHKE-E2TC 时有效）
+    # ============================================
+    if model_name == "MHKE-E2TC":
+        config.e2tc_weight = 1.0      # Caption Loss 权重 (建议: 0.5-2.0)
+        config.num_epochs = 10         # 训练轮数
+        config.batch_size = 32         # 批次大小（E2TC显存占用较大，可适当减小）
+        config.learning_rate = 1e-5    # 学习率
+        
+        print("=" * 60)
+        print("E2TC Configuration:")
+        print(f"  E2TC Weight: {config.e2tc_weight}")
+        print(f"  Epochs: {config.num_epochs}")
+        print(f"  Batch Size: {config.batch_size}")
+        print(f"  Learning Rate: {config.learning_rate}")
+        print("=" * 60)
 
     np.random.seed(config.seed)
     torch.manual_seed(config.seed)
@@ -46,28 +74,53 @@ if __name__ == '__main__':
     train_iter = DataLoader(trn_data, batch_size=int(config.batch_size), shuffle=False)
     test_iter = DataLoader(test_data, batch_size=int(config.batch_size), shuffle=False)
 
+    # ============================================
+    # 开始训练
+    # ============================================
+    print(f"\nTraining with model: {model_name}")
+    print(f"Task: {task_name}")
+    print(f"Training samples: {len(trn_data)}")
+    print(f"Test samples: {len(test_data)}")
+    print("=" * 60 + "\n")
+    
     train(config, train_iter, test_iter)
-
-    # weights = [0.5]
-    # for weight in weights:
-    #     config.weight = weight
-    #     train(config, train_iter, test_iter)
-
+    
+    # ============================================
+    # 超参数搜索（可选）
+    # ============================================
+    # 1. E2TC权重搜索
+    # if model_name == "MHKE-E2TC":
+    #     e2tc_weights = [0.5, 1.0, 2.0]
+    #     for weight in e2tc_weights:
+    #         config.e2tc_weight = weight
+    #         print(f"\n>>> Testing E2TC weight: {weight}")
+    #         train(config, train_iter, test_iter)
+    
+    # 2. Batch size搜索
     # all_batch_size = [16, 32, 64]
     # for batch_size in all_batch_size:
     #     config.batch_size = batch_size
     #     train(config, train_iter, test_iter)
-
-    # learning_rate = [1e-4, 5e-5]
-    # for batch_size in learning_rate:
-    #     config.learning_rate = batch_size
+    
+    # 3. 学习率搜索
+    # learning_rates = [1e-5, 2e-5, 5e-5]
+    # for lr in learning_rates:
+    #     config.learning_rate = lr
     #     train(config, train_iter, test_iter)
 
-    # model = MHKE(config).to(config.device)
-    # path = '{}/ckp-MHKE_B-32_E-10_Lr-1e-05_w-0.5_task_1_add-BEST.tar'.format(config.checkpoint_path, model_name, 'BEST')
-    # checkpoint = torch.load(path)
+    # ============================================
+    # 模型加载和测试（可选）
+    # ============================================
+    # 加载训练好的模型进行推理
+    # if model_name == "MHKE-E2TC":
+    #     model = MHKE_E2TC(config).to(config.device)
+    # elif model_name == "MHKE":
+    #     model = MHKE(config).to(config.device)
+    # 
+    # checkpoint_path = f'{config.checkpoint_path}/ckp-{model_name}_B-{config.batch_size}_E-{config.num_epochs}_Lr-{config.learning_rate}_w-{config.weight}_{task_name}_add-BEST.tar'
+    # checkpoint = torch.load(checkpoint_path)
     # model.load_state_dict(checkpoint['model_state_dict'])
-
+    # 
     # preds = test(model, test_iter)
 
 
