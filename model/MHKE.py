@@ -140,7 +140,7 @@ class MHKE_CrossAttention(nn.Module):
     使用交叉注意力的多模态知识增强检测器
     - 保留 GPT-4V 生成的知识描述增强
     - 使用双向交叉注意力进行多模态融合
-    - 冻结预训练模型参数以防止过拟合
+    - 部分冻结预训练模型（底层冻结，顶层可训练）
     """
     def __init__(self, config):
         super().__init__()
@@ -149,22 +149,40 @@ class MHKE_CrossAttention(nn.Module):
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
         
-        # 🧊 冻结预训练模型参数
-        for param in self.cv_model.parameters():
-            param.requires_grad = False
-        for param in self.nlp_model.parameters():
-            param.requires_grad = False
-        print("✓ Pretrained ViT and RoBERTa parameters frozen")
+        # 🧊 部分冻结：只冻结底层，保留顶层可训练
+        freeze_layers = 8  # 冻结前 8 层（共 12 层），顶部 4 层可训练
         
-        # 双向交叉注意力 (Dropout 增加到 0.3)
-        self.text_to_image_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.3)
-        self.image_to_text_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.3)
+        # 冻结 ViT embeddings 和底层
+        for param in self.cv_model.embeddings.parameters():
+            param.requires_grad = False
+        for i, layer in enumerate(self.cv_model.encoder.layer):
+            if i < freeze_layers:
+                for param in layer.parameters():
+                    param.requires_grad = False
         
-        # 融合层 (Dropout 增加到 0.3)
+        # 冻结 RoBERTa embeddings 和底层
+        for param in self.nlp_model.embeddings.parameters():
+            param.requires_grad = False
+        for i, layer in enumerate(self.nlp_model.encoder.layer):
+            if i < freeze_layers:
+                for param in layer.parameters():
+                    param.requires_grad = False
+        
+        # 统计可训练参数
+        trainable_params = sum(p.numel() for p in self.cv_model.parameters() if p.requires_grad)
+        trainable_params += sum(p.numel() for p in self.nlp_model.parameters() if p.requires_grad)
+        print(f"✓ Partial freezing: bottom {freeze_layers} layers frozen, top {12-freeze_layers} layers trainable")
+        print(f"  Trainable params in pretrained models: {trainable_params:,}")
+        
+        # 双向交叉注意力 (Dropout 0.2)
+        self.text_to_image_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.2)
+        self.image_to_text_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.2)
+        
+        # 融合层 (Dropout 0.2)
         self.fusion_layer = nn.Sequential(
             nn.Linear(config.hidden_dim * 2, config.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.3)
+            nn.Dropout(0.2)
         )
         
         self.classifier = nn.Linear(config.hidden_dim, config.num_classes)
