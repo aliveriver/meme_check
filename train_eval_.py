@@ -15,6 +15,7 @@ from dataset.dataset import get_time_dif, convert_onehot
 from model.clip import *
 from model.vit_roberta import *
 from model.MHKE import *
+from model.uncertainty_weighting import MultiTaskUncertaintyWeighting
 
 
 def train(config, train_iter, dev_iter):
@@ -38,8 +39,17 @@ def train(config, train_iter, dev_iter):
     elif config.model_name == "MHKE":
         model = MHKE(config).to(config.device)
 
-    model_name = '{}_B-{}_E-{}_Lr-{}_w-{}_{}_add'.format(config.model_name, config.batch_size,
-                                                         config.num_epochs, config.learning_rate, config.weight, config.task_name)
+    # 生成模型名称 (用于保存路径)
+    # 区分 uncertainty weighting 模式和固定权重模式
+    use_uw = getattr(config, 'use_uncertainty_weighting', False)
+    if use_uw:
+        weight_str = "UW"  # Uncertainty Weighting
+    else:
+        weight_str = f"w-{config.weight}"
+    model_name = '{}_B-{}_E-{}_Lr-{}_{}_{}_add'.format(
+        config.model_name, config.batch_size, config.num_epochs, 
+        config.learning_rate, weight_str, config.task_name
+    )
     # for name, parameters in model.named_parameters():
     #     print(name)
     params = list(model.named_parameters())
@@ -63,7 +73,36 @@ def train(config, train_iter, dev_iter):
     
     # 是否使用E2TC
     use_e2tc = (config.model_name == "MHKE-E2TC")
-    e2tc_weight = config.e2tc_weight if hasattr(config, 'e2tc_weight') else 1.0
+    
+    # Kendall Uncertainty Weighting: 是否使用自动学习权重
+    use_uncertainty_weighting = use_e2tc and getattr(config, 'use_uncertainty_weighting', False)
+    
+    if use_uncertainty_weighting:
+        # 初始化不确定性权重模块
+        # init_log_vars: [cls_log_var, cap_log_var]
+        # 默认 [0.0, 0.0] -> σ² = 1 -> 初始权重约为 0.5
+        # 可通过 config.init_log_vars 自定义
+        init_log_vars = getattr(config, 'init_log_vars', [0.0, 0.0])
+        uncertainty_module = MultiTaskUncertaintyWeighting(
+            num_tasks=2,
+            init_log_vars=init_log_vars
+        ).to(config.device)
+        
+        # 优化器需要包含 uncertainty_module 的参数
+        model_optimizer = optim.AdamW([
+            {'params': model.parameters(), 'lr': config.learning_rate},
+            {'params': uncertainty_module.parameters(), 'lr': config.learning_rate}
+        ])
+        
+        print("=" * 60)
+        print("Kendall Uncertainty Weighting ENABLED")
+        print(f"  Initial log_vars: {init_log_vars}")
+        print(f"  Initial sigmas: {uncertainty_module.get_sigmas()}")
+        print(f"  Initial weights: {uncertainty_module.get_weights()}")
+        print("=" * 60)
+    else:
+        uncertainty_module = None
+        e2tc_weight = config.e2tc_weight if hasattr(config, 'e2tc_weight') else 1.0
     
     max_score = 0
 
@@ -84,20 +123,20 @@ def train(config, train_iter, dev_iter):
             if use_e2tc:
                 # E2TC模型返回 (cls_logits, cap_logits)
                 cls_logits, cap_logits = model(**batch)
-                cls_logits = cls_logits.cpu()
+                # NOTE: 不要在这里 .cpu()，保持在GPU上计算loss
             else:
                 # 原始模型只返回 cls_logits
-                cls_logits = model(**batch).cpu()
+                cls_logits = model(**batch)
                 cap_logits = None
 
             if config.task_name == "task_1":
-                label = batch['label']
-                pred = get_preds(config, cls_logits)
+                label = batch['label'].to(config.device)  # 确保 label 也在 GPU
+                pred = get_preds(config, cls_logits.detach().cpu())  # 只在计算pred时移到CPU
             else:
-                label = batch['type_label']
-                pred = get_preds_task2(config, cls_logits)
+                label = batch['type_label'].to(config.device)
+                pred = get_preds_task2(config, cls_logits.detach().cpu())
             
-            # 1. 计算分类 Loss (主任务)
+            # 1. 计算分类 Loss (主任务) - 在 GPU 上计算
             loss_cls = loss_fn(cls_logits, label.float())
             
             # 2. 计算描述生成 Loss (辅助任务)
@@ -112,14 +151,18 @@ def train(config, train_iter, dev_iter):
                 )
                 loss_cap_all += loss_cap.item()
             
-            # 3. 联合 Loss (E2TC 论文思想)
-            if use_e2tc and isinstance(loss_cap, torch.Tensor):
+            # 3. 联合 Loss
+            if use_uncertainty_weighting and isinstance(loss_cap, torch.Tensor):
+                # Kendall Uncertainty Weighting: 使用可学习的 σ 自动平衡损失
+                total_loss, current_weights = uncertainty_module(loss_cls, loss_cap)
+            elif use_e2tc and isinstance(loss_cap, torch.Tensor):
+                # 固定权重模式 (原始 E2TC)
                 total_loss = loss_cls + (e2tc_weight * loss_cap)
             else:
                 total_loss = loss_cls
 
             preds.extend(pred)
-            labels.extend(label.detach().numpy())
+            labels.extend(label.detach().cpu().numpy())
 
             loss_all += total_loss.item()
             loss_cls_all += loss_cls.item()
@@ -137,6 +180,21 @@ def train(config, train_iter, dev_iter):
             print("Epoch {} - Cls Loss: {:.4f}, Cap Loss: {:.4f}, Total Loss: {:.4f}".format(
                 epoch, loss_cls_all/len(train_iter), loss_cap_all/len(train_iter), loss_all/len(train_iter)
             ))
+            
+            # 打印 Kendall Uncertainty Weighting 学习到的参数
+            if use_uncertainty_weighting:
+                sigmas = uncertainty_module.get_sigmas()
+                weights = uncertainty_module.get_weights()
+                log_vars = uncertainty_module.get_log_vars()
+                print("  Learned σ (uncertainties): cls_σ={:.4f}, cap_σ={:.4f}".format(
+                    sigmas[0], sigmas[1]
+                ))
+                print("  Effective weights: cls_w={:.4f}, cap_w={:.4f}".format(
+                    weights[0], weights[1]
+                ))
+                print("  log(σ²) values: cls={:.4f}, cap={:.4f}".format(
+                    log_vars[0], log_vars[1]
+                ))
 
         # 验证
         if epoch >= config.num_warm:

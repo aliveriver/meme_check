@@ -61,7 +61,11 @@ class Config_base(object):
         self.weight = 0.5
         
         # E2TC: 图像描述监督模块参数
-        self.e2tc_weight = 1.0                                          # E2TC caption loss权重
+        self.e2tc_weight = 1.0                                          # E2TC caption loss权重 (固定权重模式)
+        
+        # Kendall Uncertainty Weighting (可选: 自动学习权重)
+        self.use_uncertainty_weighting = False                          # 是否使用不确定性加权
+        self.init_log_vars = [0.0, 0.0]                                 # 初始 log(σ²) 值: [cls, cap]
 
         # train
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')   # 设备

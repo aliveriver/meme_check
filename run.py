@@ -38,14 +38,32 @@ if __name__ == '__main__':
     # E2TC 超参数配置（仅当使用 MHKE-E2TC 时有效）
     # ============================================
     if model_name == "MHKE-E2TC":
-        config.e2tc_weight = 1.0      # Caption Loss 权重 (建议: 0.5-2.0)
+        # --- 基础训练参数 ---
         config.num_epochs = 10         # 训练轮数
         config.batch_size = 32         # 批次大小（E2TC显存占用较大，可适当减小）
         config.learning_rate = 1e-5    # 学习率
         
+        # --- 损失权重配置 (二选一) ---
+        # 方案 A: 固定权重 (手动调参)
+        # config.use_uncertainty_weighting = False
+        # config.e2tc_weight = 1.0      # Caption Loss 权重 (建议: 0.5-2.0)
+        
+        # 方案 B: Kendall Uncertainty Weighting (自动学习权重) [推荐]
+        config.use_uncertainty_weighting = True
+        config.init_log_vars = [-0.5, 0.5]  # 初始 log(σ²) 值: [cls, cap]
+        # 说明:
+        #   - 模型会自动学习每个任务的 σ (不确定性)
+        #   - 有效权重 = 1 / (2 * σ²)
+        #   - σ 越大 -> 权重越小 (任务噪声大)
+        #   - σ 越小 -> 权重越大 (任务更确定)
+        
         print("=" * 60)
         print("E2TC Configuration:")
-        print(f"  E2TC Weight: {config.e2tc_weight}")
+        if config.use_uncertainty_weighting:
+            print("  Loss Weighting: Kendall Uncertainty (auto-learned)")
+            print(f"  Initial log(σ²): {config.init_log_vars}")
+        else:
+            print(f"  Loss Weighting: Fixed (e2tc_weight={config.e2tc_weight})")
         print(f"  Epochs: {config.num_epochs}")
         print(f"  Batch Size: {config.batch_size}")
         print(f"  Learning Rate: {config.learning_rate}")
