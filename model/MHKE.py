@@ -140,6 +140,7 @@ class MHKE_CrossAttention(nn.Module):
     使用交叉注意力的多模态知识增强检测器
     - 保留 GPT-4V 生成的知识描述增强
     - 使用双向交叉注意力进行多模态融合
+    - 冻结预训练模型参数以防止过拟合
     """
     def __init__(self, config):
         super().__init__()
@@ -148,15 +149,22 @@ class MHKE_CrossAttention(nn.Module):
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
         
-        # 双向交叉注意力
-        self.text_to_image_attn = CrossModalAttention(config.hidden_dim, num_heads=8)
-        self.image_to_text_attn = CrossModalAttention(config.hidden_dim, num_heads=8)
+        # 🧊 冻结预训练模型参数
+        for param in self.cv_model.parameters():
+            param.requires_grad = False
+        for param in self.nlp_model.parameters():
+            param.requires_grad = False
+        print("✓ Pretrained ViT and RoBERTa parameters frozen")
         
-        # 融合层
+        # 双向交叉注意力 (Dropout 增加到 0.3)
+        self.text_to_image_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.3)
+        self.image_to_text_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.3)
+        
+        # 融合层 (Dropout 增加到 0.3)
         self.fusion_layer = nn.Sequential(
             nn.Linear(config.hidden_dim * 2, config.hidden_dim),
             nn.ReLU(),
-            nn.Dropout(0.1)
+            nn.Dropout(0.3)
         )
         
         self.classifier = nn.Linear(config.hidden_dim, config.num_classes)

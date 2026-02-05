@@ -58,6 +58,11 @@ def train(config, train_iter, dev_iter):
 
     loss_fn = nn.BCEWithLogitsLoss()
     max_score = 0
+    
+    # Early stopping 参数
+    patience = getattr(config, 'patience', 3)  # 默认 patience=3
+    no_improve_count = 0
+    best_epoch = 0
 
     for epoch in range(config.num_epochs):
         model.train()
@@ -104,8 +109,33 @@ def train(config, train_iter, dev_iter):
             f.write(' ==================================================  Epoch: {}  ==================================================\n'.format(epoch))
             f.write('TrainScore: \n{}\nEvalScore: \n{}\n'.format(
                 json.dumps(trn_scores), json.dumps(dev_scores)))
-            max_score = save_best(config, epoch, model_name,
-                                  model, dev_scores, max_score)
+            
+            # Early stopping 检查
+            curr_score = dev_scores[config.score_key]
+            if curr_score > max_score:
+                max_score = curr_score
+                best_epoch = epoch
+                no_improve_count = 0
+                # 保存最佳模型
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                }, '{}/ckp-{}-{}.tar'.format(config.checkpoint_path, model_name, 'BEST'))
+                print(f"✓ New best F1: {curr_score:.4f} at epoch {epoch}")
+            else:
+                no_improve_count += 1
+                print(f"✗ No improvement for {no_improve_count} epoch(s). Best F1: {max_score:.4f} at epoch {best_epoch}")
+            
+            # Early stopping 触发
+            if no_improve_count >= patience:
+                print(f"\n⚠️ Early stopping triggered! No improvement for {patience} consecutive epochs.")
+                print(f"Best F1: {max_score:.4f} achieved at epoch {best_epoch}")
+                f.write(f'\n=== Early Stopping at epoch {epoch} ===\n')
+                f.write(f'Best F1: {max_score:.4f} at epoch {best_epoch}\n')
+                f.close()
+                break
+                
+            f.close()
         print("ALLTRAINED for {} epochs".format(epoch))
 
 
