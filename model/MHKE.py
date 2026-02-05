@@ -93,6 +93,115 @@ class MHKE_CLIP(nn.Module):
         return output
 
 
+class CrossModalAttention(nn.Module):
+    """
+    交叉模态注意力模块
+    让一个模态的特征"关注"另一个模态的特征
+    """
+    def __init__(self, hidden_dim, num_heads=8, dropout=0.1):
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, query, key_value):
+        """
+        query: 查询模态特征 [batch, hidden_dim]
+        key_value: 被关注模态特征 [batch, hidden_dim]
+        返回: 增强后的query特征, 注意力权重
+        """
+        # 扩展维度以适配 MultiheadAttention
+        if query.dim() == 2:
+            query = query.unsqueeze(1)  # [batch, 1, hidden_dim]
+        if key_value.dim() == 2:
+            key_value = key_value.unsqueeze(1)  # [batch, 1, hidden_dim]
+            
+        # Cross-attention: Q来自query模态，K和V来自key_value模态
+        attn_output, attn_weights = self.multihead_attn(
+            query=query,
+            key=key_value,
+            value=key_value
+        )
+        
+        # 残差连接 + LayerNorm
+        attn_output = self.dropout(attn_output)
+        output = self.layer_norm(query + attn_output)
+        
+        return output.squeeze(1), attn_weights
+
+
+class MHKE_CrossAttention(nn.Module):
+    """
+    使用交叉注意力的多模态知识增强检测器
+    - 保留 GPT-4V 生成的知识描述增强
+    - 使用双向交叉注意力进行多模态融合
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.cv_path = config.vit_path
+        self.nlp_path = config.chinese_roberta_path
+        self.cv_model = ViTModel.from_pretrained(self.cv_path)
+        self.nlp_model = BertModel.from_pretrained(self.nlp_path)
+        
+        # 双向交叉注意力
+        self.text_to_image_attn = CrossModalAttention(config.hidden_dim, num_heads=8)
+        self.image_to_text_attn = CrossModalAttention(config.hidden_dim, num_heads=8)
+        
+        # 融合层
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1)
+        )
+        
+        self.classifier = nn.Linear(config.hidden_dim, config.num_classes)
+        self.device = config.device
+        self.weight = config.weight
+
+    def forward(self, **args):
+        # 1. 提取文本特征（包含知识增强）
+        text_outputs = self.nlp_model(
+            input_ids=args['input_ids'].to(self.device),
+            attention_mask=args['attention_mask'].to(self.device)
+        )
+        text_discription_outputs = self.nlp_model(
+            input_ids=args['text_discription_input_ids'].to(self.device),
+            attention_mask=args['text_discription_attention_mask'].to(self.device)
+        )
+        meme_discription_outputs = self.nlp_model(
+            input_ids=args['meme_discription_input_ids'].to(self.device),
+            attention_mask=args['meme_discription_attention_mask'].to(self.device)
+        )
+        
+        # 知识增强：融合原始文本和描述
+        text_features = text_outputs['pooler_output'] + \
+            self.weight * meme_discription_outputs['pooler_output'] + \
+            text_discription_outputs['pooler_output']
+        
+        # 2. 提取图像特征
+        image_outputs = self.cv_model(
+            pixel_values=args['image_tensor'].to(self.device)
+        )
+        image_features = image_outputs['pooler_output']
+        
+        # 3. 双向交叉注意力融合
+        text_enhanced, _ = self.text_to_image_attn(text_features, image_features)   # 文本关注图像
+        image_enhanced, _ = self.image_to_text_attn(image_features, text_features)  # 图像关注文本
+        
+        # 4. 特征融合
+        fused_features = torch.cat((text_enhanced, image_enhanced), dim=1)
+        fused_features = self.fusion_layer(fused_features)
+        
+        # 5. 分类
+        output = self.classifier(fused_features)
+        return output
+
+
 class QKVAttention(nn.Module):
     def __init__(self):
         super(QKVAttention, self).__init__()
