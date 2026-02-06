@@ -135,12 +135,68 @@ class CrossModalAttention(nn.Module):
         return output.squeeze(1), attn_weights
 
 
+class SequenceCrossAttention(nn.Module):
+    """
+    序列级交叉注意力模块
+    让一个模态的完整序列"关注"另一个模态的完整序列
+    """
+    def __init__(self, hidden_dim, num_heads=8, dropout=0.1):
+        super().__init__()
+        self.multihead_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Dropout(dropout)
+        )
+        self.layer_norm2 = nn.LayerNorm(hidden_dim)
+        
+    def forward(self, query_seq, key_value_seq, query_mask=None, kv_mask=None):
+        """
+        query_seq: 查询模态序列 [batch, seq_len_q, hidden_dim]
+        key_value_seq: 被关注模态序列 [batch, seq_len_kv, hidden_dim]
+        query_mask: 查询序列的attention mask [batch, seq_len_q]
+        kv_mask: KV序列的attention mask [batch, seq_len_kv]
+        返回: 增强后的query序列 [batch, seq_len_q, hidden_dim]
+        """
+        # 创建 key_padding_mask (True 表示 padding 位置)
+        key_padding_mask = None
+        if kv_mask is not None:
+            key_padding_mask = (kv_mask == 0)  # [batch, seq_len_kv]
+            
+        # Cross-attention
+        attn_output, _ = self.multihead_attn(
+            query=query_seq,
+            key=key_value_seq,
+            value=key_value_seq,
+            key_padding_mask=key_padding_mask
+        )
+        
+        # 残差连接 + LayerNorm
+        attn_output = self.dropout(attn_output)
+        hidden = self.layer_norm(query_seq + attn_output)
+        
+        # FFN + 残差
+        ffn_output = self.ffn(hidden)
+        output = self.layer_norm2(hidden + ffn_output)
+        
+        return output
+
+
 class MHKE_CrossAttention(nn.Module):
     """
-    使用交叉注意力的多模态知识增强检测器
-    - 保留 GPT-4V 生成的知识描述增强
-    - 使用双向交叉注意力进行多模态融合
-    - 部分冻结预训练模型（底层冻结，顶层可训练）
+    使用序列级交叉注意力的多模态知识增强检测器
+    - 使用 last_hidden_state (完整序列) 而非 pooler_output
+    - 文本序列的每个 token 关注图像的每个 patch
+    - 图像序列的每个 patch 关注文本的每个 token
     """
     def __init__(self, config):
         super().__init__()
@@ -174,56 +230,79 @@ class MHKE_CrossAttention(nn.Module):
         print(f"✓ Partial freezing: bottom {freeze_layers} layers frozen, top {12-freeze_layers} layers trainable")
         print(f"  Trainable params in pretrained models: {trainable_params:,}")
         
-        # 双向交叉注意力 (Dropout 0.2)
-        self.text_to_image_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.2)
-        self.image_to_text_attn = CrossModalAttention(config.hidden_dim, num_heads=8, dropout=0.2)
+        # 序列级双向交叉注意力
+        self.text_to_image_attn = SequenceCrossAttention(config.hidden_dim, num_heads=8, dropout=0.2)
+        self.image_to_text_attn = SequenceCrossAttention(config.hidden_dim, num_heads=8, dropout=0.2)
         
-        # 融合层 (Dropout 0.2)
+        # 融合层
         self.fusion_layer = nn.Sequential(
             nn.Linear(config.hidden_dim * 2, config.hidden_dim),
-            nn.ReLU(),
+            nn.GELU(),
             nn.Dropout(0.2)
         )
         
         self.classifier = nn.Linear(config.hidden_dim, config.num_classes)
         self.device = config.device
         self.weight = config.weight
+        
+        print(f"✓ Sequence-level cross-attention enabled")
+
+    def mean_pooling(self, hidden_states, attention_mask=None):
+        """对序列进行平均池化"""
+        if attention_mask is not None:
+            # 使用 attention_mask 进行加权平均
+            mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+            sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
+            sum_mask = mask_expanded.sum(dim=1).clamp(min=1e-9)
+            return sum_hidden / sum_mask
+        else:
+            return hidden_states.mean(dim=1)
 
     def forward(self, **args):
-        # 1. 提取文本特征（包含知识增强）
+        # 1. 提取文本序列特征
         text_outputs = self.nlp_model(
             input_ids=args['input_ids'].to(self.device),
             attention_mask=args['attention_mask'].to(self.device)
         )
-        text_discription_outputs = self.nlp_model(
+        text_seq = text_outputs['last_hidden_state']  # [batch, 64, 768]
+        text_mask = args['attention_mask'].to(self.device)
+        
+        # 知识描述也用序列
+        text_desc_outputs = self.nlp_model(
             input_ids=args['text_discription_input_ids'].to(self.device),
             attention_mask=args['text_discription_attention_mask'].to(self.device)
         )
-        meme_discription_outputs = self.nlp_model(
+        meme_desc_outputs = self.nlp_model(
             input_ids=args['meme_discription_input_ids'].to(self.device),
             attention_mask=args['meme_discription_attention_mask'].to(self.device)
         )
         
-        # 知识增强：融合原始文本和描述
-        text_features = text_outputs['pooler_output'] + \
-            self.weight * meme_discription_outputs['pooler_output'] + \
-            text_discription_outputs['pooler_output']
+        # 知识增强：在序列级别融合（使用 pooler 进行加权）
+        text_seq = text_seq + \
+            self.weight * meme_desc_outputs['pooler_output'].unsqueeze(1) + \
+            text_desc_outputs['pooler_output'].unsqueeze(1)
         
-        # 2. 提取图像特征
+        # 2. 提取图像序列特征
         image_outputs = self.cv_model(
             pixel_values=args['image_tensor'].to(self.device)
         )
-        image_features = image_outputs['pooler_output']
+        image_seq = image_outputs['last_hidden_state']  # [batch, 197, 768] (1 CLS + 196 patches)
         
-        # 3. 双向交叉注意力融合
-        text_enhanced, _ = self.text_to_image_attn(text_features, image_features)   # 文本关注图像
-        image_enhanced, _ = self.image_to_text_attn(image_features, text_features)  # 图像关注文本
+        # 3. 序列级双向交叉注意力
+        # 文本序列关注图像序列
+        text_enhanced_seq = self.text_to_image_attn(text_seq, image_seq, query_mask=text_mask)
+        # 图像序列关注文本序列
+        image_enhanced_seq = self.image_to_text_attn(image_seq, text_seq, kv_mask=text_mask)
         
-        # 4. 特征融合
-        fused_features = torch.cat((text_enhanced, image_enhanced), dim=1)
-        fused_features = self.fusion_layer(fused_features)
+        # 4. 池化：将序列压缩为单个向量
+        text_pooled = self.mean_pooling(text_enhanced_seq, text_mask)  # [batch, 768]
+        image_pooled = image_enhanced_seq[:, 0, :]  # 使用 CLS token [batch, 768]
         
-        # 5. 分类
+        # 5. 特征融合
+        fused_features = torch.cat((text_pooled, image_pooled), dim=1)  # [batch, 1536]
+        fused_features = self.fusion_layer(fused_features)  # [batch, 768]
+        
+        # 6. 分类
         output = self.classifier(fused_features)
         return output
 
