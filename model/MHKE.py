@@ -306,6 +306,200 @@ class MHKE_CrossAttention(nn.Module):
         return output
 
 
+class StackedCrossAttentionLayer(nn.Module):
+    """
+    堆叠式交叉注意力层
+    包含：自注意力 -> 交叉注意力 -> FFN，带门控残差
+    """
+    def __init__(self, hidden_dim, num_heads=8, dropout=0.3):
+        super().__init__()
+        # 自注意力（增强自身模态表示）
+        self.self_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.self_attn_norm = nn.LayerNorm(hidden_dim)
+        
+        # 交叉注意力（关注另一模态）
+        self.cross_attn = nn.MultiheadAttention(
+            embed_dim=hidden_dim,
+            num_heads=num_heads,
+            dropout=dropout,
+            batch_first=True
+        )
+        self.cross_attn_norm = nn.LayerNorm(hidden_dim)
+        
+        # 门控机制（控制交叉注意力的贡献）
+        self.gate = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Sigmoid()
+        )
+        
+        # FFN
+        self.ffn = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim * 4),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim * 4, hidden_dim),
+            nn.Dropout(dropout)
+        )
+        self.ffn_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        
+    def forward(self, query_seq, kv_seq, query_mask=None, kv_mask=None):
+        """
+        query_seq: [batch, seq_len_q, hidden_dim]
+        kv_seq: [batch, seq_len_kv, hidden_dim]
+        """
+        # 1. 自注意力
+        query_padding_mask = (query_mask == 0) if query_mask is not None else None
+        self_attn_out, _ = self.self_attn(query_seq, query_seq, query_seq, 
+                                           key_padding_mask=query_padding_mask)
+        query_seq = self.self_attn_norm(query_seq + self.dropout(self_attn_out))
+        
+        # 2. 交叉注意力
+        kv_padding_mask = (kv_mask == 0) if kv_mask is not None else None
+        cross_attn_out, _ = self.cross_attn(query_seq, kv_seq, kv_seq,
+                                             key_padding_mask=kv_padding_mask)
+        
+        # 3. 门控残差（自适应控制交叉信息融入程度）
+        gate_input = torch.cat([query_seq, cross_attn_out], dim=-1)
+        gate_value = self.gate(gate_input)  # [batch, seq_len, hidden_dim]
+        gated_cross = gate_value * cross_attn_out
+        query_seq = self.cross_attn_norm(query_seq + self.dropout(gated_cross))
+        
+        # 4. FFN
+        ffn_out = self.ffn(query_seq)
+        output = self.ffn_norm(query_seq + ffn_out)
+        
+        return output
+
+
+class MHKE_CrossAttention_V2(nn.Module):
+    """
+    改进版交叉注意力检测器 V2
+    改进点：
+    1. 2层堆叠交叉注意力（信息多次交互）
+    2. 每层包含自注意力 + 交叉注意力
+    3. 门控残差连接（自适应控制注意力贡献）
+    4. 更强正则化 (dropout=0.3)
+    """
+    def __init__(self, config):
+        super().__init__()
+        self.cv_path = config.vit_path
+        self.nlp_path = config.chinese_roberta_path
+        self.cv_model = ViTModel.from_pretrained(self.cv_path)
+        self.nlp_model = BertModel.from_pretrained(self.nlp_path)
+        
+        # 🧊 部分冻结
+        freeze_layers = 8
+        for param in self.cv_model.embeddings.parameters():
+            param.requires_grad = False
+        for i, layer in enumerate(self.cv_model.encoder.layer):
+            if i < freeze_layers:
+                for param in layer.parameters():
+                    param.requires_grad = False
+        for param in self.nlp_model.embeddings.parameters():
+            param.requires_grad = False
+        for i, layer in enumerate(self.nlp_model.encoder.layer):
+            if i < freeze_layers:
+                for param in layer.parameters():
+                    param.requires_grad = False
+        
+        print(f"✓ Partial freezing: bottom {freeze_layers} layers frozen")
+        
+        # 堆叠交叉注意力层 (2层)
+        self.num_layers = 2
+        self.text_cross_layers = nn.ModuleList([
+            StackedCrossAttentionLayer(config.hidden_dim, num_heads=8, dropout=0.3)
+            for _ in range(self.num_layers)
+        ])
+        self.image_cross_layers = nn.ModuleList([
+            StackedCrossAttentionLayer(config.hidden_dim, num_heads=8, dropout=0.3)
+            for _ in range(self.num_layers)
+        ])
+        
+        # 融合层
+        self.fusion_layer = nn.Sequential(
+            nn.Linear(config.hidden_dim * 2, config.hidden_dim),
+            nn.LayerNorm(config.hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.3)
+        )
+        
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(config.hidden_dim, config.num_classes)
+        )
+        self.device = config.device
+        self.weight = config.weight
+        
+        trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        print(f"✓ MHKE_CrossAttention_V2: {self.num_layers} stacked layers with gated residual")
+        print(f"  Trainable parameters: {trainable:,}")
+
+    def mean_pooling(self, hidden_states, attention_mask=None):
+        if attention_mask is not None:
+            mask_expanded = attention_mask.unsqueeze(-1).expand(hidden_states.size()).float()
+            sum_hidden = torch.sum(hidden_states * mask_expanded, dim=1)
+            sum_mask = mask_expanded.sum(dim=1).clamp(min=1e-9)
+            return sum_hidden / sum_mask
+        else:
+            return hidden_states.mean(dim=1)
+
+    def forward(self, **args):
+        # 1. 提取文本序列特征
+        text_outputs = self.nlp_model(
+            input_ids=args['input_ids'].to(self.device),
+            attention_mask=args['attention_mask'].to(self.device)
+        )
+        text_seq = text_outputs['last_hidden_state']
+        text_mask = args['attention_mask'].to(self.device)
+        
+        # 知识增强
+        text_desc_outputs = self.nlp_model(
+            input_ids=args['text_discription_input_ids'].to(self.device),
+            attention_mask=args['text_discription_attention_mask'].to(self.device)
+        )
+        meme_desc_outputs = self.nlp_model(
+            input_ids=args['meme_discription_input_ids'].to(self.device),
+            attention_mask=args['meme_discription_attention_mask'].to(self.device)
+        )
+        text_seq = text_seq + \
+            self.weight * meme_desc_outputs['pooler_output'].unsqueeze(1) + \
+            text_desc_outputs['pooler_output'].unsqueeze(1)
+        
+        # 2. 提取图像序列特征
+        image_outputs = self.cv_model(
+            pixel_values=args['image_tensor'].to(self.device)
+        )
+        image_seq = image_outputs['last_hidden_state']
+        
+        # 3. 堆叠交叉注意力（多层交互）
+        for i in range(self.num_layers):
+            # 文本关注图像
+            text_seq = self.text_cross_layers[i](
+                text_seq, image_seq, query_mask=text_mask
+            )
+            # 图像关注文本
+            image_seq = self.image_cross_layers[i](
+                image_seq, text_seq, kv_mask=text_mask
+            )
+        
+        # 4. 池化
+        text_pooled = self.mean_pooling(text_seq, text_mask)
+        image_pooled = image_seq[:, 0, :]  # CLS token
+        
+        # 5. 融合 + 分类
+        fused = torch.cat((text_pooled, image_pooled), dim=1)
+        fused = self.fusion_layer(fused)
+        output = self.classifier(fused)
+        
+        return output
+
+
 class GatedFusion(nn.Module):
     """
     门控多模态融合

@@ -36,6 +36,8 @@ def train(config, train_iter, dev_iter):
         model = MHKE(config).to(config.device)
     elif config.model_name == "MHKE_CrossAttention":
         model = MHKE_CrossAttention(config).to(config.device)
+    elif config.model_name == "MHKE_CrossAttention_V2":
+        model = MHKE_CrossAttention_V2(config).to(config.device)
     elif config.model_name == "MHKE_ISSUES":
         model = MHKE_ISSUES(config).to(config.device)
 
