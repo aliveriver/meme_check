@@ -306,6 +306,31 @@ class MHKE_CrossAttention(nn.Module):
         return output
 
 
+class DeepFusion(nn.Module):
+    """深层MLP融合网络"""
+    def __init__(self, input_dim, hidden_dim, output_dim):
+        super().__init__()
+        self.network = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.LayerNorm(hidden_dim // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim // 2, output_dim)
+        )
+    
+    def forward(self, text_features, image_features):
+        combined = torch.cat([text_features, image_features], dim=-1)
+        return self.network(combined)
+
+
 class Combiner(nn.Module):
     """
     ISSUES 论文中的 Combiner 网络
@@ -407,19 +432,21 @@ class MHKE_ISSUES(nn.Module):
         # 3. Combiner 网络
         self.combiner = Combiner(self.hidden_dim, self.projection_dim, dropout=0.2)
         
-        # 4. 分类器 (使用投影维度)
-        self.classifier = nn.Sequential(
-            nn.Linear(self.projection_dim * 2, self.projection_dim),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(self.projection_dim, config.num_classes)
+        # 4. 深层MLP融合 + 分类器 (替换原有简单融合)
+        # 输入: combined_text(256) + image_proj(256) = 512
+        # hidden: 768 -> 768 -> 384 -> num_classes
+        self.deep_fusion = DeepFusion(
+            input_dim=self.projection_dim * 2,  # 512
+            hidden_dim=self.hidden_dim,          # 768
+            output_dim=config.num_classes
         )
         
         # 设置训练阶段
         self._set_training_stage(training_stage)
         
-        print(f"✓ MHKE_ISSUES initialized with training_stage={training_stage}")
+        print(f"✓ MHKE_ISSUES initialized with DeepFusion, training_stage={training_stage}")
         print(f"  Projection dim: {self.projection_dim}")
+        print(f"  DeepFusion: {self.projection_dim * 2} -> {self.hidden_dim} -> {self.hidden_dim} -> {self.hidden_dim // 2} -> {config.num_classes}")
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"  Trainable parameters: {trainable:,}")
     
@@ -493,13 +520,10 @@ class MHKE_ISSUES(nn.Module):
         # 用 Combiner 融合文本特征和图像伪词
         combined_text = self.combiner(text_proj, image_as_text)  # [batch, 256]
         
-        # ===== 5. 最终融合与分类 =====
+        # ===== 5. 深层MLP融合与分类 =====
         
-        # 拼接：融合后的文本 + 图像投影
-        final_features = torch.cat([combined_text, image_proj], dim=-1)  # [batch, 512]
-        
-        # 分类
-        output = self.classifier(final_features)
+        # 使用 DeepFusion 进行深层融合并直接输出分类结果
+        output = self.deep_fusion(combined_text, image_proj)
         return output
 
 
