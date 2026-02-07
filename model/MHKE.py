@@ -306,29 +306,44 @@ class MHKE_CrossAttention(nn.Module):
         return output
 
 
-class DeepFusion(nn.Module):
-    """深层MLP融合网络"""
-    def __init__(self, input_dim, hidden_dim, output_dim):
+class GatedFusion(nn.Module):
+    """
+    门控多模态融合
+    通过可学习的门控机制自适应调整两个模态的贡献
+    比 DeepFusion 更轻量，有助于缓解过拟合
+    """
+    def __init__(self, hidden_dim, dropout=0.3):
         super().__init__()
-        self.network = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.2),
+        # 门控网络：根据两个模态的联合信息计算门控值
+        self.gate_text = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(hidden_dim),
-            nn.GELU(),
-            nn.Dropout(0.2),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.LayerNorm(hidden_dim // 2),
-            nn.GELU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim // 2, output_dim)
+            nn.Sigmoid()
         )
-    
+        self.gate_image = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.Sigmoid()
+        )
+        self.layer_norm = nn.LayerNorm(hidden_dim)
+        self.dropout = nn.Dropout(dropout)
+        
     def forward(self, text_features, image_features):
+        """
+        text_features: [batch, hidden_dim]
+        image_features: [batch, hidden_dim]
+        返回: 门控融合后的特征 [batch, hidden_dim]
+        """
         combined = torch.cat([text_features, image_features], dim=-1)
-        return self.network(combined)
+        # 计算门控值
+        gate_t = self.gate_text(combined)   # [batch, hidden_dim]
+        gate_i = self.gate_image(combined)  # [batch, hidden_dim]
+        # 加权融合
+        fused = gate_t * text_features + gate_i * image_features
+        fused = self.dropout(fused)
+        return self.layer_norm(fused)
 
 
 class Combiner(nn.Module):
@@ -430,23 +445,22 @@ class MHKE_ISSUES(nn.Module):
         )
         
         # 3. Combiner 网络
-        self.combiner = Combiner(self.hidden_dim, self.projection_dim, dropout=0.2)
+        self.combiner = Combiner(self.hidden_dim, self.projection_dim, dropout=0.3)
         
-        # 4. 深层MLP融合 + 分类器 (替换原有简单融合)
-        # 输入: combined_text(256) + image_proj(256) = 512
-        # hidden: 768 -> 768 -> 384 -> num_classes
-        self.deep_fusion = DeepFusion(
-            input_dim=self.projection_dim * 2,  # 512
-            hidden_dim=self.hidden_dim,          # 768
-            output_dim=config.num_classes
+        # 4. 门控融合 (轻量级，缓解过拟合)
+        self.gated_fusion = GatedFusion(self.projection_dim, dropout=0.3)
+        
+        # 5. 分类器 (简化结构)
+        self.classifier = nn.Sequential(
+            nn.Dropout(0.3),
+            nn.Linear(self.projection_dim, config.num_classes)
         )
         
         # 设置训练阶段
         self._set_training_stage(training_stage)
         
-        print(f"✓ MHKE_ISSUES initialized with DeepFusion, training_stage={training_stage}")
+        print(f"✓ MHKE_ISSUES initialized with GatedFusion, training_stage={training_stage}")
         print(f"  Projection dim: {self.projection_dim}")
-        print(f"  DeepFusion: {self.projection_dim * 2} -> {self.hidden_dim} -> {self.hidden_dim} -> {self.hidden_dim // 2} -> {config.num_classes}")
         trainable = sum(p.numel() for p in self.parameters() if p.requires_grad)
         print(f"  Trainable parameters: {trainable:,}")
     
@@ -520,10 +534,13 @@ class MHKE_ISSUES(nn.Module):
         # 用 Combiner 融合文本特征和图像伪词
         combined_text = self.combiner(text_proj, image_as_text)  # [batch, 256]
         
-        # ===== 5. 深层MLP融合与分类 =====
+        # ===== 5. 门控融合与分类 =====
         
-        # 使用 DeepFusion 进行深层融合并直接输出分类结果
-        output = self.deep_fusion(combined_text, image_proj)
+        # 使用 GatedFusion 进行自适应融合
+        fused = self.gated_fusion(combined_text, image_proj)  # [batch, 256]
+        
+        # 分类
+        output = self.classifier(fused)
         return output
 
 
