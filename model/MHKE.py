@@ -205,8 +205,8 @@ class MHKE_CrossAttention(nn.Module):
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
         
-        # 🧊 部分冻结：只冻结底层，保留顶层可训练
-        freeze_layers = 8  # 冻结前 8 层（共 12 层），顶部 4 层可训练
+        # 🧊 更激进的冻结：只保留顶部 2 层可训练
+        freeze_layers = 10  # 冻结前 10 层（共 12 层），顶部 2 层可训练
         
         # 冻结 ViT embeddings 和底层
         for param in self.cv_model.embeddings.parameters():

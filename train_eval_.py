@@ -60,7 +60,21 @@ def train(config, train_iter, dev_iter):
         model_optimizer = optim.AdamW(
             model.parameters(), lr=config.learning_rate)
 
-    loss_fn = nn.BCEWithLogitsLoss()
+    # Label Smoothing: 缓解过拟合
+    label_smoothing = getattr(config, 'label_smoothing', 0.1)
+    print(f"✓ Using Label Smoothing: {label_smoothing}")
+    
+    def label_smoothing_loss(logits, labels, smoothing=0.1):
+        """
+        Label Smoothing for BCEWithLogitsLoss
+        将标签从 0/1 平滑为 smoothing/2 和 1-smoothing/2
+        例如 smoothing=0.1 时: 0 -> 0.05, 1 -> 0.95
+        """
+        with torch.no_grad():
+            smoothed_labels = labels * (1.0 - smoothing) + smoothing / 2
+        return nn.functional.binary_cross_entropy_with_logits(logits, smoothed_labels)
+    
+    loss_fn = lambda logits, labels: label_smoothing_loss(logits, labels, label_smoothing)
     max_score = 0
     
     # Early stopping 参数
