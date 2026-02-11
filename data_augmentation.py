@@ -1,39 +1,44 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-数据增强脚本 - 调用 Qwen 8B 大模型，以思维链 (CoT) 形式生成增强版数据描述
+数据增强脚本 - 调用 Qwen3-VL-8B-Instruct 大模型，以思维链 (CoT) 形式生成增强版数据描述
 输出 train_data_discription_3.0.json 和 test_data_discription_3.0.json
 
-使用方法:
-    # 处理训练集
-    python data_augmentation.py --split train
+使用方法 (在 AutoDL 服务器上运行):
+    # 1. 先启动 LLaMA-Factory API 服务（另开一个终端）
+    cd /root/autodl-tmp/LLaMA-Factory
+    API_PORT=8000 llamafactory-cli api chat \
+        --model_name_or_path Qwen/Qwen3-VL-8B-Instruct \
+        --template qwen3_vl \
+        --infer_backend vllm
+
+    # 2. 运行增强脚本
+    cd /root/MEME
+
+    # 先用 dry-run 测试 3 条样本，确认 API 正常
+    python data_augmentation.py --dry-run --use-image
+
+    # 处理训练集（默认开启多模态）
+    python data_augmentation.py --split train --use-image
 
     # 处理测试集
-    python data_augmentation.py --split test
+    python data_augmentation.py --split test --use-image
 
     # 同时处理训练集和测试集
-    python data_augmentation.py --split all
+    python data_augmentation.py --split all --use-image
 
-    # 指定 API 地址和并发数
-    python data_augmentation.py --split all --api-base http://localhost:8000/v1 --workers 4
+    # 从断点续传（中断后继续）
+    python data_augmentation.py --split train --use-image --resume
 
-    # 从断点续传（自动跳过已处理样本）
-    python data_augmentation.py --split train --resume
+    # 自定义 API 端口
+    python data_augmentation.py --split all --use-image --api-base http://localhost:8000/v1
 
-模型部署说明:
-    本脚本使用 OpenAI 兼容的 API 格式（vLLM / Ollama / TGI 等均支持）。
-    部署 Qwen 模型后，修改下方 API_BASE 为实际地址即可。
-
-    vLLM 部署示例:
-        python -m vllm.entrypoints.openai.api_server \\
-            --model Qwen/Qwen2.5-7B-Instruct \\
-            --served-model-name qwen \\
-            --port 8000
-
-    Ollama 部署示例:
-        ollama serve
-        ollama run qwen2.5:7b
-        # API 地址为 http://localhost:11434/v1
+环境说明:
+    - 服务器: AutoDL
+    - 模型: Qwen3-VL-8B-Instruct (视觉语言模型)
+    - 框架: LLaMA-Factory (位于 /root/autodl-tmp/LLaMA-Factory)
+    - 项目: /root/MEME
+    - API: OpenAI 兼容格式 (LLaMA-Factory 默认端口 8000)
 """
 
 import json
@@ -49,13 +54,13 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Optional
 
 # ============================================================
-# 配置区 - 根据实际部署情况修改
+# 配置区 - AutoDL 服务器环境
 # ============================================================
 
-# API 配置 (OpenAI 兼容格式)
-API_BASE = "http://localhost:8000/v1"      # vLLM 默认端口
-API_KEY = "EMPTY"                           # vLLM 不需要 key，填 EMPTY 即可
-MODEL_NAME = "qwen"                         # served-model-name
+# API 配置 (LLaMA-Factory OpenAI 兼容格式)
+API_BASE = "http://localhost:8000/v1"      # LLaMA-Factory API 默认端口
+API_KEY = "0"                               # LLaMA-Factory 默认 key
+MODEL_NAME = "Qwen3-VL-8B-Instruct"        # 模型名称
 
 # 生成参数
 MAX_TOKENS = 1024
@@ -63,12 +68,12 @@ TEMPERATURE = 0.7
 TOP_P = 0.9
 
 # 并发与重试
-MAX_WORKERS = 2           # 并发请求数（根据 GPU 显存调整）
+MAX_WORKERS = 1           # 单卡建议设为 1，避免 OOM
 MAX_RETRIES = 3           # 单条失败最大重试次数
-RETRY_DELAY = 2           # 重试间隔（秒）
-REQUEST_DELAY = 0.1       # 请求间隔（秒），避免打满 GPU
+RETRY_DELAY = 3           # 重试间隔（秒）
+REQUEST_DELAY = 0.2       # 请求间隔（秒），VL 模型推理较慢，适当放宽
 
-# 路径配置
+# 路径配置 (AutoDL 服务器: /root/MEME)
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(PROJECT_ROOT, "data")
 MEME_DIR = os.path.join(DATA_DIR, "meme")
