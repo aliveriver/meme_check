@@ -248,18 +248,17 @@ def call_qwen_api(
 # CoT Prompt 构造
 # ============================================================
 
-SYSTEM_PROMPT = """你是一个专业的中文网络梗图（meme）内容分析专家。
-你的任务是对给定的梗图进行深度分析，使用思维链 (Chain-of-Thought) 的方式，
-逐步推理该梗图是否有害，并给出详细的分析过程。
+SYSTEM_PROMPT = """你是一个专业的中文网络梗图内容分析专家，熟悉中文互联网各种文化与梗图。
+你的任务是对给定的梗图进行深度分析，使用思维链的方式，逐步分析梗图的内容与情感倾向。
 
 分析时请关注以下维度：
-1. 文本内容分析：梗图中的文字表达了什么含义？是否包含攻击性、歧视性或不当内容？
-2. 图像内容分析：图像展示了什么？图像本身是否含有有害元素？
-3. 图文结合分析：文本和图像的结合是否产生了新的含义？是否通过隐喻、反讽等手法传达有害信息？
-4. 有害类型判断：如果有害，属于哪种类型（针对性有害/性暗示/一般冒犯/丧文化）？
-5. 攻击目标识别：如果是针对性有害，攻击的目标群体是什么？
+1. 文本内容分析：梗图中的文字表达了什么含义？
+2. 图像内容分析：图像展示了什么？
+3. 文本情感分析：文本的情感是正向、中性还是负向？
+4. 图像情感分析：图像传达的情感是正向、中性还是负向？
+5. 图文结合分析：文本和图像的结合是否产生了新的含义？是否通过隐喻、反讽等手法传达特殊信息？
 
-请用中文回答，并严格按照思维链的格式输出分析过程。"""
+请用中文回答，并严格按照思维链的格式输出分析过程。注意：你只需要分析内容和情感，不需要做有害性判断或总结。"""
 
 
 def build_cot_prompt(item: dict) -> str:
@@ -276,54 +275,35 @@ def build_cot_prompt(item: dict) -> str:
     meme_desc = item.get("meme_discription", "")
     text_desc = item.get("text_discription", "")
     label = item.get("label", -1)
-    type_id = item.get("type", 0)
-    target_id = item.get("target", 0)
-    text_modal = item.get("text_modal", 0)
-    image_modal = item.get("image_modal", 0)
 
     label_str = "有害 (Harmful)" if label == 1 else "非有害 (Non-harmful)"
-    type_str = TYPE_MAP.get(type_id, "未知")
-    target_str = TARGET_MAP.get(target_id, "未知")
 
-    # 模态信息
-    modal_parts = []
-    if text_modal == 1:
-        modal_parts.append("文本有害")
-    if image_modal == 1:
-        modal_parts.append("图像有害")
-    if not modal_parts:
-        modal_parts.append("文本图像融合判断" if label == 1 else "无有害模态")
-    modal_str = "、".join(modal_parts)
-
-    prompt = f"""请对以下中文梗图进行深度分析，使用思维链 (Chain-of-Thought) 逐步推理。
+    prompt = f"""请对以下中文梗图进行深度分析，使用思维链逐步推理。
 
 ## 梗图信息
 - **梗图文本**: {text}
 - **图像描述**: {meme_desc}
 - **文本语义**: {text_desc}
 
-## 标注信息（供参考）
-- 标签: {label_str}
-- 有害类型: {type_str}
-- 有害模态: {modal_str}
-- 攻击目标: {target_str}
+## 参考标签
+- 该梗图被标注为: {label_str}
 
 请严格按照以下 Markdown 格式输出分析，不要改变标题文本：
 
 # 第一步：文本内容分析
-（在此处输出分析...）
+（分析梗图中文字的字面含义和隐含含义...）
 
 # 第二步：图像内容分析
-（在此处输出分析...）
+（分析图像展示的内容、场景、人物表情等...）
 
-# 第三步：图文结合分析
-（在此处输出分析...）
+# 第三步：文本情感分析
+（分析文本的情感倾向是正向、中性还是负向，并说明理由...）
 
-# 第四步：有害性判断
-（在此处输出分析...）
+# 第四步：图像情感分析
+（分析图像传达的情感倾向是正向、中性还是负向，并说明理由...）
 
-# 第五步：总结
-（在此处输出分析...）
+# 第五步：图文结合分析
+（分析文本和图像结合后是否产生了新的含义，是否通过隐喻、反讽等手法传达特殊信息...）
 """
 
     return prompt
@@ -348,18 +328,18 @@ def parse_cot_response(response: str) -> dict:
         "cot_full": response,
         "cot_text_analysis": "",
         "cot_image_analysis": "",
+        "cot_text_sentiment": "",
+        "cot_image_sentiment": "",
         "cot_fusion_analysis": "",
-        "cot_harm_judgment": "",
-        "cot_summary": "",
     }
 
     # 定义正则模式：匹配 # 标题 或 ### 标题，后跟内容，直到下一个标题或结束
     patterns = {
         "cot_text_analysis": r"(?:#+\s*第一步[:：]?\s*文本内容分析)(.*?)(?=#+\s*第二步|$)",
         "cot_image_analysis": r"(?:#+\s*第二步[:：]?\s*图像内容分析)(.*?)(?=#+\s*第三步|$)",
-        "cot_fusion_analysis": r"(?:#+\s*第三步[:：]?\s*图文结合分析)(.*?)(?=#+\s*第四步|$)",
-        "cot_harm_judgment": r"(?:#+\s*第四步[:：]?\s*有害性判断)(.*?)(?=#+\s*第五步|$)",
-        "cot_summary": r"(?:#+\s*第五步[:：]?\s*总结)(.*$)",
+        "cot_text_sentiment": r"(?:#+\s*第三步[:：]?\s*文本情感分析)(.*?)(?=#+\s*第四步|$)",
+        "cot_image_sentiment": r"(?:#+\s*第四步[:：]?\s*图像情感分析)(.*?)(?=#+\s*第五步|$)",
+        "cot_fusion_analysis": r"(?:#+\s*第五步[:：]?\s*图文结合分析)(.*$)",
     }
 
     for key, pattern in patterns.items():
@@ -430,9 +410,9 @@ def process_single_item(
             "cot_full": "",
             "cot_text_analysis": "",
             "cot_image_analysis": "",
+            "cot_text_sentiment": "",
+            "cot_image_sentiment": "",
             "cot_fusion_analysis": "",
-            "cot_harm_judgment": "",
-            "cot_summary": "",
         }
 
     # 合并原数据和 CoT 增强数据
@@ -702,12 +682,20 @@ def main():
         with open(TRAIN_INPUT, "r", encoding="utf-8") as f:
             data = json.load(f)[:3]
 
+        dry_run_results = []
         for i, item in enumerate(data):
             logger.info(f"\n--- 样本 {i+1} ---")
             logger.info(f"  Path: {item['path']}")
             logger.info(f"  Text: {item['text'][:50]}...")
             result = process_single_item(i, item, 3, args.use_image)
-            logger.info(f"  CoT 总结: {result.get('cot_summary', 'N/A')[:100]}...")
+            dry_run_results.append(result)
+            logger.info(f"  CoT 图文结合: {result.get('cot_fusion_analysis', 'N/A')[:100]}...")
+
+        # 保存临时 JSON 供查看
+        dry_run_output = os.path.join(DATA_DIR, "dry_run_preview.json")
+        with open(dry_run_output, "w", encoding="utf-8") as f:
+            json.dump(dry_run_results, f, ensure_ascii=False, indent=2)
+        logger.info(f"\n📄 试运行结果已保存至: {dry_run_output}")
 
         logger.info("\n✅ 试运行完成！")
         return
