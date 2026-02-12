@@ -249,11 +249,11 @@ def call_qwen_api(
 # ============================================================
 
 SYSTEM_PROMPT = """你是一个专业的中文网络梗图内容分析专家，熟悉中文互联网各种文化与梗图。
-你的任务是对给定的梗图进行简洁的内容与情感分析。
+你的任务是对给定的梗图进行简洁的情感分析和标签判定理由分析。
 
 要求：
-- 每个步骤请控制在2-3句话以内，情感分析只需1句话给出结论和理由
-- 只分析内容和情感，不需要做有害性判断或总结
+- 每个步骤请控制在2-3句话以内
+- 情感分析用1句话给出结论（负向或非负向）和理由
 - 用中文回答，严格按照指定格式输出"""
 
 
@@ -284,7 +284,7 @@ def build_cot_prompt(item: dict) -> str:
 ## 参考标签
 - 该梗图被标注为: {label_str}
 
-请严格按照以下格式输出，每步限2-3句话，情感分析限1句话：
+请严格按照以下格式输出：
 
 # 第一步：文本内容分析
 （2-3句概括文字的字面含义和隐含含义）
@@ -293,13 +293,13 @@ def build_cot_prompt(item: dict) -> str:
 （2-3句概括图像内容和表达效果）
 
 # 第三步：文本情感分析
-（1句话：情感倾向是正向/中性/负向，因为...）
+（1句话判断文本情感是否负向：负向或非负向，并简要说明理由）
 
 # 第四步：图像情感分析
-（1句话：情感倾向是正向/中性/负向，因为...）
+（1句话判断图像情感是否负向：负向或非负向，并简要说明理由）
 
-# 第五步：图文结合分析
-（2-3句分析图文结合产生的新含义或修辞手法）
+# 第五步：标签判定理由
+（2-3句解释为什么该梗图被判定为{label_str}）
 """
 
     return prompt
@@ -309,39 +309,55 @@ def build_cot_prompt(item: dict) -> str:
 # 解析模型输出
 # ============================================================
 
+def _parse_sentiment_to_binary(text: str) -> int:
+    """将情感分析文本转换为 0/1（负向=1, 非负向=0）"""
+    if "负向" in text or "负面" in text:
+        return 1
+    return 0
+
+
 def parse_cot_response(response: str) -> dict:
     """
-    使用正则解析 Markdown 标题，更稳健地提取各步骤的分析内容。
-    支持 # 和 ### 两种标题格式，兼容冒号/中文冒号。
+    解析模型输出，提取：
+    - text_modal: 文本情感是否负向 (0/1)
+    - image_modal: 图像情感是否负向 (0/1)
+    - cot_fusion_analysis: 标签判定理由
 
     Args:
         response: 模型的原始输出文本
 
     Returns:
-        包含各步骤分析的字典
+        包含 text_modal, image_modal, cot_fusion_analysis 的字典
     """
     result = {
-        "cot_full": response,
-        "cot_text_analysis": "",
-        "cot_image_analysis": "",
-        "cot_text_sentiment": "",
-        "cot_image_sentiment": "",
+        "text_modal": 0,
+        "image_modal": 0,
         "cot_fusion_analysis": "",
     }
 
-    # 定义正则模式：匹配 # 标题 或 ### 标题，后跟内容，直到下一个标题或结束
-    patterns = {
-        "cot_text_analysis": r"(?:#+\s*第一步[:：]?\s*文本内容分析)(.*?)(?=#+\s*第二步|$)",
-        "cot_image_analysis": r"(?:#+\s*第二步[:：]?\s*图像内容分析)(.*?)(?=#+\s*第三步|$)",
-        "cot_text_sentiment": r"(?:#+\s*第三步[:：]?\s*文本情感分析)(.*?)(?=#+\s*第四步|$)",
-        "cot_image_sentiment": r"(?:#+\s*第四步[:：]?\s*图像情感分析)(.*?)(?=#+\s*第五步|$)",
-        "cot_fusion_analysis": r"(?:#+\s*第五步[:：]?\s*图文结合分析)(.*$)",
-    }
+    # 提取文本情感 → text_modal
+    m = re.search(
+        r"(?:#+\s*第三步[:：]?\s*文本情感分析)(.*?)(?=#+\s*第四步|$)",
+        response, re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        result["text_modal"] = _parse_sentiment_to_binary(m.group(1))
 
-    for key, pattern in patterns.items():
-        match = re.search(pattern, response, re.DOTALL | re.IGNORECASE)
-        if match:
-            result[key] = match.group(1).strip()
+    # 提取图像情感 → image_modal
+    m = re.search(
+        r"(?:#+\s*第四步[:：]?\s*图像情感分析)(.*?)(?=#+\s*第五步|$)",
+        response, re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        result["image_modal"] = _parse_sentiment_to_binary(m.group(1))
+
+    # 提取标签判定理由 → cot_fusion_analysis
+    m = re.search(
+        r"(?:#+\s*第五步[:：]?\s*标签判定理由)(.*$)",
+        response, re.DOTALL | re.IGNORECASE,
+    )
+    if m:
+        result["cot_fusion_analysis"] = m.group(1).strip()
 
     return result
 
@@ -403,15 +419,12 @@ def process_single_item(
         cot_result = parse_cot_response(response)
     else:
         cot_result = {
-            "cot_full": "",
-            "cot_text_analysis": "",
-            "cot_image_analysis": "",
-            "cot_text_sentiment": "",
-            "cot_image_sentiment": "",
+            "text_modal": 0,
+            "image_modal": 0,
             "cot_fusion_analysis": "",
         }
 
-    # 合并原数据和 CoT 增强数据
+    # 合并原数据和 CoT 增强数据（text_modal / image_modal 会被覆盖）
     augmented_item = dict(item)
     augmented_item.update(cot_result)
 
@@ -685,7 +698,8 @@ def main():
             logger.info(f"  Text: {item['text'][:50]}...")
             result = process_single_item(i, item, 3, args.use_image)
             dry_run_results.append(result)
-            logger.info(f"  CoT 图文结合: {result.get('cot_fusion_analysis', 'N/A')[:100]}...")
+            logger.info(f"  text_modal={result['text_modal']}, image_modal={result['image_modal']}")
+            logger.info(f"  判定理由: {result.get('cot_fusion_analysis', 'N/A')[:100]}...")
 
         # 保存临时 JSON 供查看
         dry_run_output = os.path.join(DATA_DIR, "dry_run_preview.json")
