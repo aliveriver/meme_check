@@ -37,9 +37,9 @@ class Config_base(object):
         # 数据路径（相对路径）
         data_dir = path.join(self.project_root, 'data')
         self.meme_path = path.join(data_dir, 'meme') + path.sep
-        self.train_path = path.join(data_dir, 'train_data_discription.json')
-        self.dev_path = path.join(data_dir, 'test_data_discription.json')
-        self.test_path = path.join(data_dir, 'test_data_discription.json')
+        self.train_path = path.join(data_dir, 'train_data_discription_3.0.json')
+        self.dev_path = path.join(data_dir, 'test_data_discription_3.0.json')
+        self.test_path = path.join(data_dir, 'test_data_discription_3.0.json')
         
         # 输出路径（相对路径）
         self.result_path = path.join(self.project_root, 'result')
@@ -54,6 +54,11 @@ class Config_base(object):
         # dataset
         self.seed = 1        
         self.pad_size = 64                                              # 每句话处理成的长度(短填长切)
+
+        # CoT (Chain-of-Thought) 生成配置
+        self.cot_max_len = 128                                          # CoT 最大生成长度
+        self.cot_loss_weight = 0.5                                      # CoT loss 权重
+        self.cot_vocab_size = 21128                                     # BERT tokenizer 词表大小
 
         # model
         self.dropout = 0.5                                              # 随机失活

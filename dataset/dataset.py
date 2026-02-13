@@ -26,6 +26,7 @@ class MemeDataset(Dataset):
         else:
             self.data = pd.read_json(config.test_path)
         self.max_len = config.pad_size
+        self.cot_max_len = getattr(config, 'cot_max_len', 128)
 
     def __len__(self):
         return len(self.data)
@@ -40,6 +41,9 @@ class MemeDataset(Dataset):
 
         text_discription = data_row.text_discription
         meme_discription = data_row.meme_discription
+
+        # CoT 融合分析文本
+        cot_text = str(data_row.get('cot_fusion_analysis', '')) if 'cot_fusion_analysis' in data_row.index else ''
 
         label = torch.tensor(label).float()
         type_label = torch.tensor(type_label).float()
@@ -66,6 +70,10 @@ class MemeDataset(Dataset):
         else:
             image_inputs = self.extractor(image, return_tensors='pt')
 
+        # CoT tokenize
+        cot_inputs = self.tokenizer(
+            cot_text, max_length=self.cot_max_len, padding="max_length", truncation=True, return_tensors="pt")
+
         input_ids = text_inputs["input_ids"].squeeze()
         attention_mask = text_inputs["attention_mask"].squeeze()
         text_discription_input_ids = text_discription_inputs["input_ids"].squeeze()
@@ -74,6 +82,9 @@ class MemeDataset(Dataset):
         meme_discription_attention_mask = meme_discription_inputs["attention_mask"].squeeze()
 
         image_tensor = image_inputs["pixel_values"].squeeze()
+
+        cot_input_ids = cot_inputs["input_ids"].squeeze()
+        cot_attention_mask = cot_inputs["attention_mask"].squeeze()
 
         return dict(
             input_ids=input_ids,
@@ -85,7 +96,9 @@ class MemeDataset(Dataset):
             image_tensor=image_tensor,
             label=label,
             type_label=type_label,
-            modal=modal
+            modal=modal,
+            cot_input_ids=cot_input_ids,
+            cot_attention_mask=cot_attention_mask,
         )
 
 

@@ -28,17 +28,9 @@ if __name__ == '__main__':
     torch.cuda.manual_seed_all(config.seed)
     torch.backends.cudnn.deterministic = True  # 保证每次结果一样
 
-    if not os.path.exists(config.data_path): 
-        trn_data = MemeDataset(config, training=True)
-        test_data = MemeDataset(config, training=False)
-        torch.save({
-            'trn_data' : trn_data,
-            'test_data' : test_data,
-            }, config.data_path)
-    else:
-        checkpoint = torch.load(config.data_path)
-        trn_data = checkpoint['trn_data']
-        test_data = checkpoint['test_data']
+    # 始终重新构建 Dataset（数据格式已更新，旧缓存不兼容）
+    trn_data = MemeDataset(config, training=True)
+    test_data = MemeDataset(config, training=False)
 
     print('The size of the Training dataset: {}'.format(len(trn_data)))
     print('The size of the Test dataset: {}'.format(len(test_data)))

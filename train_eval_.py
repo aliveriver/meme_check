@@ -11,6 +11,7 @@ from tqdm import tqdm
 
 import time
 import json
+from transformers import BertTokenizer
 from dataset.dataset import get_time_dif, convert_onehot
 from model.clip import *
 from model.vit_roberta import *
@@ -62,7 +63,12 @@ def train(config, train_iter, dev_iter):
 
     # Label Smoothing: 缓解过拟合
     label_smoothing = getattr(config, 'label_smoothing', 0.1)
+    cot_loss_weight = getattr(config, 'cot_loss_weight', 0.5)
     print(f"✓ Using Label Smoothing: {label_smoothing}")
+    print(f"✓ CoT loss weight: {cot_loss_weight}")
+    
+    # CoT loss: CrossEntropy (ignore padding token 0)
+    cot_loss_fn = nn.CrossEntropyLoss(ignore_index=0)
     
     def label_smoothing_loss(logits, labels, smoothing=0.1):
         """
@@ -92,8 +98,13 @@ def train(config, train_iter, dev_iter):
 
         for batch in tqdm(train_iter, desc='Training', colour='MAGENTA'):
             model.zero_grad()
-            # print(batch)
-            logit = model(**batch).cpu()
+            output = model(**batch)
+            
+            # 兼容 dict 输出和纯 tensor 输出
+            if isinstance(output, dict):
+                logit = output['logit'].cpu()
+            else:
+                logit = output.cpu()
 
             if config.task_name == "task_1":
                 label = batch['label']
@@ -101,14 +112,25 @@ def train(config, train_iter, dev_iter):
             else:
                 label = batch['type_label']
                 pred = get_preds_task2(config, logit)
-            loss = loss_fn(logit, label.float())
+            cls_loss = loss_fn(logit, label.float())
+            
+            # CoT loss
+            total_loss = cls_loss
+            if isinstance(output, dict) and 'cot_logits' in output:
+                cot_logits = output['cot_logits']  # [batch, seq_len, vocab_size]
+                cot_labels = batch['cot_input_ids'].to(cot_logits.device)
+                # Shift: 预测下一个 token
+                shift_logits = cot_logits[:, :-1, :].contiguous()
+                shift_labels = cot_labels[:, 1:].contiguous()
+                cot_loss = cot_loss_fn(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
+                total_loss = cls_loss + cot_loss_weight * cot_loss
 
             preds.extend(pred)
             labels.extend(label.detach().numpy())
 
-            loss_all += loss.item()
+            loss_all += total_loss.item()
             model_optimizer.zero_grad()
-            loss.backward()
+            total_loss.backward()
             model_optimizer.step()
 
         end_time = time.time()
@@ -120,7 +142,7 @@ def train(config, train_iter, dev_iter):
             # print("training loss: loss={}".format(loss_all/len(data)))
             trn_scores = get_scores(preds, labels, loss_all, len(
                 train_iter), data_name="TRAIN")
-            dev_scores, _ = eval(config, model, loss_fn,
+            dev_scores, _, cot_texts = eval(config, model, loss_fn,
                                  dev_iter, data_name='DEV')
             f = open(
                 '{}/{}.all_scores.txt'.format(config.result_path, model_name), 'a')
@@ -162,10 +184,25 @@ def eval(config, model, loss_fn, dev_iter, data_name='DEV'):
     loss_all = 0.
     preds = []
     labels = []
+    cot_texts = []  # 收集生成的 CoT 文本
+
+    # 用于 CoT 生成的 tokenizer
+    tokenizer = BertTokenizer.from_pretrained(config.roberta_path)
 
     for batch in tqdm(dev_iter, desc='Evaling', colour='CYAN'):
         with torch.no_grad():
-            logit = model(**batch).cpu()
+            output = model(**batch)
+            
+            if isinstance(output, dict):
+                logit = output['logit'].cpu()
+                # CoT 生成
+                if hasattr(model, 'cot_decoder'):
+                    fused = output.get('fused_features', None)
+                    if fused is not None:
+                        batch_cot = model.cot_decoder.generate(fused.to(config.device), tokenizer)
+                        cot_texts.extend(batch_cot)
+            else:
+                logit = output.cpu()
 
             if config.task_name == "task_1":
                 label = batch['label']
@@ -182,25 +219,44 @@ def eval(config, model, loss_fn, dev_iter, data_name='DEV'):
 
     dev_scores = get_scores(preds, labels, loss_all,
                             len(dev_iter), data_name=data_name)
+    
+    # 打印几条 CoT 示例
+    if cot_texts:
+        print(f"\n--- CoT 生成示例 (\u5171 {len(cot_texts)} 条) ---")
+        for i, txt in enumerate(cot_texts[:3]):
+            print(f"  [{i}] {txt[:200]}")
+        print("---")
 
-    return dev_scores, preds
+    return dev_scores, preds, cot_texts
 
 
 def test(model, dev_iter):
 
     preds = []
     labels = []
+    cot_texts = []
+
+    # 用于 CoT 生成的 tokenizer (如果模型有 cot_decoder)
+    tokenizer = None
+    if hasattr(model, 'cot_decoder'):
+        from transformers import BertTokenizer
+        tokenizer = BertTokenizer.from_pretrained(model.nlp_path)
 
     for batch in tqdm(dev_iter, desc='Testing', colour='CYAN'):
         with torch.no_grad():
-            logit = model(**batch).cpu()
+            output = model(**batch)
 
-            # if config.task_name == "task_1":
-            #     label = batch['label']
-            #     pred = get_preds(config, logit)
-            # else:
-            #     label = batch['type_label']
-            #     pred = get_preds_task2(config, logit)
+            if isinstance(output, dict):
+                logit = output['logit'].cpu()
+                # CoT 生成
+                if tokenizer is not None:
+                    fused = output.get('fused_features', None)
+                    if fused is not None:
+                        batch_cot = model.cot_decoder.generate(fused.to(model.device), tokenizer)
+                        cot_texts.extend(batch_cot)
+            else:
+                logit = output.cpu()
+
             label = batch['label']
             pred = output_preds(logit)
 
@@ -208,6 +264,9 @@ def test(model, dev_iter):
             labels.extend(label.detach().numpy())
 
         df = pd.DataFrame({'new_pred': preds})
+        if cot_texts:
+            # 对齐长度
+            df['cot_reason'] = cot_texts[:len(preds)] + [''] * max(0, len(preds) - len(cot_texts))
         output_file = 'preds.csv'
         df.to_csv(output_file, index=False)
 
