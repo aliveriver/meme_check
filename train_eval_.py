@@ -11,7 +11,6 @@ from tqdm import tqdm
 
 import time
 import json
-from transformers import BertTokenizer
 from dataset.dataset import get_time_dif, convert_onehot
 from model.clip import *
 from model.vit_roberta import *
@@ -44,43 +43,23 @@ def train(config, train_iter, dev_iter):
 
     model_name = '{}_B-{}_E-{}_Lr-{}_w-{}_{}_add'.format(config.model_name, config.batch_size,
                                                          config.num_epochs, config.learning_rate, config.weight, config.task_name)
-    # for name, parameters in model.named_parameters():
-    #     print(name)
     params = list(model.named_parameters())
 
     if config.model_name == "resnet":
         model_optimizer = optim.Adam(
             model.parameters(), lr=config.learning_rate)
-    # elif config.model_name == "vit-roberta":
-    #     model_optimizer = optim.AdamW([
-    #         {'params':model.cv_model.parameters(), 'lr': 5e-5},
-    #         {'params':model.nlp_model.parameters(), 'lr': config.learning_rate},
-    #         {'params':model.classifier.parameters(), 'lr': config.learning_rate}
-    #     ])
     else:
         model_optimizer = optim.AdamW(
             model.parameters(), lr=config.learning_rate)
 
-    # Label Smoothing: 缓解过拟合
-    label_smoothing = getattr(config, 'label_smoothing', 0.1)
-    cot_loss_weight = getattr(config, 'cot_loss_weight', 0.5)
-    print(f"✓ Using Label Smoothing: {label_smoothing}")
-    print(f"✓ CoT loss weight: {cot_loss_weight}")
+    loss_fn = nn.BCEWithLogitsLoss()
     
-    # CoT loss: CrossEntropy (ignore padding token 0)
-    cot_loss_fn = nn.CrossEntropyLoss(ignore_index=0)
+    # R-Drop 正则化配置
+    rdrop_alpha = getattr(config, 'rdrop_alpha', 0.5)
+    use_rdrop = rdrop_alpha > 0
+    if use_rdrop:
+        print(f"✓ R-Drop regularization enabled (alpha={rdrop_alpha})")
     
-    def label_smoothing_loss(logits, labels, smoothing=0.1):
-        """
-        Label Smoothing for BCEWithLogitsLoss
-        将标签从 0/1 平滑为 smoothing/2 和 1-smoothing/2
-        例如 smoothing=0.1 时: 0 -> 0.05, 1 -> 0.95
-        """
-        with torch.no_grad():
-            smoothed_labels = labels * (1.0 - smoothing) + smoothing / 2
-        return nn.functional.binary_cross_entropy_with_logits(logits, smoothed_labels)
-    
-    loss_fn = lambda logits, labels: label_smoothing_loss(logits, labels, label_smoothing)
     max_score = 0
     
     # Early stopping 参数
@@ -98,39 +77,46 @@ def train(config, train_iter, dev_iter):
 
         for batch in tqdm(train_iter, desc='Training', colour='MAGENTA'):
             model.zero_grad()
-            output = model(**batch)
             
-            # 兼容 dict 输出和纯 tensor 输出
-            if isinstance(output, dict):
-                logit = output['logit'].cpu()
+            if use_rdrop:
+                # R-Drop: 两次前向传播（不同的 dropout mask）
+                logit1 = model(**batch).cpu()
+                logit2 = model(**batch).cpu()
+                
+                if config.task_name == "task_1":
+                    label = batch['label']
+                    pred = get_preds(config, logit1)
+                else:
+                    label = batch['type_label']
+                    pred = get_preds_task2(config, logit1)
+                
+                # 分类损失取平均
+                cls_loss = (loss_fn(logit1, label.float()) + loss_fn(logit2, label.float())) / 2
+                
+                # KL 散度正则化（对称）
+                p1 = F.softmax(logit1, dim=-1)
+                p2 = F.softmax(logit2, dim=-1)
+                kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
+                           F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
+                
+                loss = cls_loss + rdrop_alpha * kl_loss
             else:
-                logit = output.cpu()
-
-            if config.task_name == "task_1":
-                label = batch['label']
-                pred = get_preds(config, logit)
-            else:
-                label = batch['type_label']
-                pred = get_preds_task2(config, logit)
-            cls_loss = loss_fn(logit, label.float())
-            
-            # CoT loss
-            total_loss = cls_loss
-            if isinstance(output, dict) and 'cot_logits' in output:
-                cot_logits = output['cot_logits']  # [batch, seq_len, vocab_size]
-                cot_labels = batch['cot_input_ids'].to(cot_logits.device)
-                # Shift: 预测下一个 token
-                shift_logits = cot_logits[:, :-1, :].contiguous()
-                shift_labels = cot_labels[:, 1:].contiguous()
-                cot_loss = cot_loss_fn(shift_logits.view(-1, shift_logits.size(-1)), shift_labels.view(-1))
-                total_loss = cls_loss + cot_loss_weight * cot_loss
+                logit = model(**batch).cpu()
+                
+                if config.task_name == "task_1":
+                    label = batch['label']
+                    pred = get_preds(config, logit)
+                else:
+                    label = batch['type_label']
+                    pred = get_preds_task2(config, logit)
+                loss = loss_fn(logit, label.float())
 
             preds.extend(pred)
             labels.extend(label.detach().numpy())
 
-            loss_all += total_loss.item()
+            loss_all += loss.item()
             model_optimizer.zero_grad()
-            total_loss.backward()
+            loss.backward()
             model_optimizer.step()
 
         end_time = time.time()
@@ -139,10 +125,9 @@ def train(config, train_iter, dev_iter):
 
         # 验证
         if epoch >= config.num_warm:
-            # print("training loss: loss={}".format(loss_all/len(data)))
             trn_scores = get_scores(preds, labels, loss_all, len(
                 train_iter), data_name="TRAIN")
-            dev_scores, _, cot_texts = eval(config, model, loss_fn,
+            dev_scores, _ = eval(config, model, loss_fn,
                                  dev_iter, data_name='DEV')
             f = open(
                 '{}/{}.all_scores.txt'.format(config.result_path, model_name), 'a')
@@ -184,25 +169,10 @@ def eval(config, model, loss_fn, dev_iter, data_name='DEV'):
     loss_all = 0.
     preds = []
     labels = []
-    cot_texts = []  # 收集生成的 CoT 文本
-
-    # 用于 CoT 生成的 tokenizer
-    tokenizer = BertTokenizer.from_pretrained(config.roberta_path)
 
     for batch in tqdm(dev_iter, desc='Evaling', colour='CYAN'):
         with torch.no_grad():
-            output = model(**batch)
-            
-            if isinstance(output, dict):
-                logit = output['logit'].cpu()
-                # CoT 生成
-                if hasattr(model, 'cot_decoder'):
-                    fused = output.get('fused_features', None)
-                    if fused is not None:
-                        batch_cot = model.cot_decoder.generate(fused.to(config.device), tokenizer)
-                        cot_texts.extend(batch_cot)
-            else:
-                logit = output.cpu()
+            logit = model(**batch).cpu()
 
             if config.task_name == "task_1":
                 label = batch['label']
@@ -219,43 +189,18 @@ def eval(config, model, loss_fn, dev_iter, data_name='DEV'):
 
     dev_scores = get_scores(preds, labels, loss_all,
                             len(dev_iter), data_name=data_name)
-    
-    # 打印几条 CoT 示例
-    if cot_texts:
-        print(f"\n--- CoT 生成示例 (\u5171 {len(cot_texts)} 条) ---")
-        for i, txt in enumerate(cot_texts[:3]):
-            print(f"  [{i}] {txt[:200]}")
-        print("---")
 
-    return dev_scores, preds, cot_texts
+    return dev_scores, preds
 
 
 def test(model, dev_iter):
 
     preds = []
     labels = []
-    cot_texts = []
-
-    # 用于 CoT 生成的 tokenizer (如果模型有 cot_decoder)
-    tokenizer = None
-    if hasattr(model, 'cot_decoder'):
-        from transformers import BertTokenizer
-        tokenizer = BertTokenizer.from_pretrained(model.nlp_path)
 
     for batch in tqdm(dev_iter, desc='Testing', colour='CYAN'):
         with torch.no_grad():
-            output = model(**batch)
-
-            if isinstance(output, dict):
-                logit = output['logit'].cpu()
-                # CoT 生成
-                if tokenizer is not None:
-                    fused = output.get('fused_features', None)
-                    if fused is not None:
-                        batch_cot = model.cot_decoder.generate(fused.to(model.device), tokenizer)
-                        cot_texts.extend(batch_cot)
-            else:
-                logit = output.cpu()
+            logit = model(**batch).cpu()
 
             label = batch['label']
             pred = output_preds(logit)
@@ -264,9 +209,6 @@ def test(model, dev_iter):
             labels.extend(label.detach().numpy())
 
         df = pd.DataFrame({'new_pred': preds})
-        if cot_texts:
-            # 对齐长度
-            df['cot_reason'] = cot_texts[:len(preds)] + [''] * max(0, len(preds) - len(cot_texts))
         output_file = 'preds.csv'
         df.to_csv(output_file, index=False)
 
@@ -287,8 +229,6 @@ def get_preds(config, logit):
 def get_preds_task2(config, logit):
     all_results = []
     logit_ = torch.sigmoid(logit)
-    # results_pred = torch.max(logit_.data, 1)[0].cpu().numpy()
-    # index for maximum probability
     results = torch.max(logit_.data, 1)[1].cpu().numpy()
     for i in range(len(results)):
         result = convert_onehot(config, results[i])

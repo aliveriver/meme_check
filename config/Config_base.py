@@ -55,10 +55,8 @@ class Config_base(object):
         self.seed = 1        
         self.pad_size = 64                                              # 每句话处理成的长度(短填长切)
 
-        # CoT (Chain-of-Thought) 生成配置
-        self.cot_max_len = 128                                          # CoT 最大生成长度
-        self.cot_loss_weight = 0.5                                      # CoT loss 权重
-        self.cot_vocab_size = 21128                                     # BERT tokenizer 词表大小
+        # R-Drop 正则化
+        self.rdrop_alpha = 0.5                                      # R-Drop KL 散度权重
 
         # model
         self.dropout = 0.5                                              # 随机失活

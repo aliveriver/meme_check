@@ -7,133 +7,6 @@ from transformers import BertModel, ViTModel
 from transformers import ChineseCLIPModel
 
 
-class CoTDecoder(nn.Module):
-    """
-    CoT (Chain-of-Thought) 解码器
-    使用 Transformer Decoder 从融合特征生成分类原因文本
-    """
-    def __init__(self, hidden_dim, vocab_size, max_len=128, num_layers=2, num_heads=8, dropout=0.2):
-        super().__init__()
-        self.hidden_dim = hidden_dim
-        self.max_len = max_len
-        
-        # Token embedding + 位置编码
-        self.token_embedding = nn.Embedding(vocab_size, hidden_dim)
-        self.position_embedding = nn.Embedding(max_len, hidden_dim)
-        self.embed_dropout = nn.Dropout(dropout)
-        self.embed_norm = nn.LayerNorm(hidden_dim)
-        
-        # Transformer Decoder
-        decoder_layer = nn.TransformerDecoderLayer(
-            d_model=hidden_dim,
-            nhead=num_heads,
-            dim_feedforward=hidden_dim * 4,
-            dropout=dropout,
-            activation='gelu',
-            batch_first=True
-        )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
-        
-        # 输出投影到 vocab
-        self.output_projection = nn.Linear(hidden_dim, vocab_size)
-        
-    def _generate_square_subsequent_mask(self, sz, device):
-        """生成因果注意力 mask (上三角为 -inf)"""
-        mask = torch.triu(torch.ones(sz, sz, device=device), diagonal=1)
-        mask = mask.masked_fill(mask == 1, float('-inf'))
-        return mask
-    
-    def forward(self, fused_features, cot_input_ids, cot_attention_mask=None):
-        """
-        训练时使用 Teacher Forcing
-        fused_features: [batch, hidden_dim] — 融合后的多模态特征
-        cot_input_ids: [batch, seq_len] — CoT 的 token 序列
-        cot_attention_mask: [batch, seq_len]
-        返回: [batch, seq_len, vocab_size] — 每个位置的 logits
-        """
-        batch_size, seq_len = cot_input_ids.shape
-        device = cot_input_ids.device
-        
-        # Token + Position embedding
-        positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-        token_emb = self.token_embedding(cot_input_ids)
-        pos_emb = self.position_embedding(positions)
-        tgt = self.embed_norm(self.embed_dropout(token_emb + pos_emb))
-        
-        # Memory: 融合特征作为 encoder 输出 [batch, 1, hidden_dim]
-        memory = fused_features.unsqueeze(1)
-        
-        # 因果 mask
-        tgt_mask = self._generate_square_subsequent_mask(seq_len, device)
-        
-        # Padding mask (True = padding position to ignore)
-        tgt_key_padding_mask = None
-        if cot_attention_mask is not None:
-            tgt_key_padding_mask = (cot_attention_mask == 0)
-        
-        # Decode
-        decoder_output = self.decoder(
-            tgt=tgt,
-            memory=memory,
-            tgt_mask=tgt_mask,
-            tgt_key_padding_mask=tgt_key_padding_mask
-        )
-        
-        # Project to vocab
-        logits = self.output_projection(decoder_output)  # [batch, seq_len, vocab_size]
-        return logits
-    
-    def generate(self, fused_features, tokenizer, max_len=None, temperature=0.7):
-        """
-        推理时自回归生成 CoT 文本
-        fused_features: [batch, hidden_dim]
-        tokenizer: BertTokenizer
-        返回: list of str — 生成的 CoT 文本
-        """
-        if max_len is None:
-            max_len = self.max_len
-        
-        batch_size = fused_features.shape[0]
-        device = fused_features.device
-        
-        # 以 [CLS] (101) 作为起始 token
-        generated = torch.full((batch_size, 1), 101, dtype=torch.long, device=device)
-        memory = fused_features.unsqueeze(1)
-        
-        for step in range(max_len - 1):
-            seq_len = generated.shape[1]
-            positions = torch.arange(seq_len, device=device).unsqueeze(0).expand(batch_size, -1)
-            token_emb = self.token_embedding(generated)
-            pos_emb = self.position_embedding(positions)
-            tgt = self.embed_norm(self.embed_dropout(token_emb + pos_emb))
-            
-            tgt_mask = self._generate_square_subsequent_mask(seq_len, device)
-            
-            decoder_output = self.decoder(tgt=tgt, memory=memory, tgt_mask=tgt_mask)
-            next_logits = decoder_output[:, -1, :] / temperature
-            logits = self.output_projection(next_logits)
-            
-            next_token = logits.argmax(dim=-1, keepdim=True)  # greedy
-            generated = torch.cat([generated, next_token], dim=1)
-            
-            # 全部生成了 [SEP] (102) 就停止
-            if (next_token.squeeze(-1) == 102).all():
-                break
-        
-        # Decode token IDs to text
-        results = []
-        for i in range(batch_size):
-            token_ids = generated[i].tolist()
-            # 截取到第一个 [SEP]
-            if 102 in token_ids:
-                token_ids = token_ids[:token_ids.index(102)]
-            # 去掉 [CLS]
-            if token_ids and token_ids[0] == 101:
-                token_ids = token_ids[1:]
-            text = tokenizer.decode(token_ids, skip_special_tokens=True)
-            results.append(text)
-        return results
-
 
 class MHKE(nn.Module):
     def __init__(self, config):
@@ -334,8 +207,8 @@ class MHKE_CrossAttention(nn.Module):
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
         
-        # 🧊 更激进的冻结：只保留顶部 2 层可训练
-        freeze_layers = 10  # 冻结前 10 层（共 12 层），顶部 2 层可训练
+        # 🧊 部分冻结：冻结底层，保留顶层可训练
+        freeze_layers = 8  # 冻结前 8 层（共 12 层），顶部 4 层可训练
         
         # 冻结 ViT embeddings 和底层
         for param in self.cv_model.embeddings.parameters():
@@ -374,19 +247,7 @@ class MHKE_CrossAttention(nn.Module):
         self.device = config.device
         self.weight = config.weight
         
-        # CoT 解码器
-        cot_vocab_size = getattr(config, 'cot_vocab_size', 21128)
-        cot_max_len = getattr(config, 'cot_max_len', 128)
-        self.cot_decoder = CoTDecoder(
-            hidden_dim=config.hidden_dim,
-            vocab_size=cot_vocab_size,
-            max_len=cot_max_len,
-            num_layers=2,
-            num_heads=8,
-            dropout=0.2
-        )
-        
-        print(f"✓ Sequence-level cross-attention enabled with CoT decoder")
+        print(f"✓ Sequence-level cross-attention enabled")
 
     def mean_pooling(self, hidden_states, attention_mask=None):
         """对序列进行平均池化"""
@@ -445,21 +306,7 @@ class MHKE_CrossAttention(nn.Module):
         # 6. 分类
         cls_logit = self.classifier(fused_features)
         
-        # 7. CoT 生成 (训练时)
-        result = {'logit': cls_logit, 'fused_features': fused_features.detach()}
-        if 'cot_input_ids' in args:
-            cot_input_ids = args['cot_input_ids'].to(self.device)
-            cot_attention_mask = args.get('cot_attention_mask', None)
-            if cot_attention_mask is not None:
-                cot_attention_mask = cot_attention_mask.to(self.device)
-            cot_logits = self.cot_decoder(
-                fused_features,  # 不 detach，保留梯度
-                cot_input_ids,
-                cot_attention_mask
-            )
-            result['cot_logits'] = cot_logits
-        
-        return result
+        return cls_logit
 
 
 class StackedCrossAttentionLayer(nn.Module):
