@@ -64,19 +64,19 @@ class Config_base(object):
         self.weight = 0.5
 
         # ====== 防过拟合配置 ======
-        self.freeze_layers = 8                                         # 冻结预训练模型底部N层 (共12层, 冻结8层训练顶部4层)
-        self.weight_decay = 0.01                                       # AdamW 权重衰减
+        self.freeze_layers = 10                                        # 冻结预训练模型底部N层 (共12层, 冻结10层训练顶部2层)
+        self.weight_decay = 0.02                                       # AdamW 权重衰减
         self.label_smoothing = 0.1                                     # 标签平滑
         self.use_augmentation = True                                   # 训练时是否使用图像增强
-        self.backbone_lr_scale = 0.2                                   # backbone学习率 = learning_rate * backbone_lr_scale
+        self.backbone_lr_scale = 0.1                                   # backbone学习率 = learning_rate * backbone_lr_scale
         self.use_scheduler = True                                      # 是否使用学习率调度器
         self.warmup_ratio = 0.06                                       # 预热比例(占总步数)
-        self.classifier_dropout = 0.3                                  # 分类头Dropout
+        self.classifier_dropout = 0.4                                  # 分类头Dropout
         self.use_ema = False                                           # 是否使用EMA (指数移动平均)
 
         # train
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')   # 设备
-        self.learning_rate = 5e-5                                       # 学习率 
+        self.learning_rate = 8e-5                                       # 学习率 (分类头)
         self.num_epochs = 30                                            # epoch数 
         self.num_warm = 0                                              # 预热
         self.batch_size = 32                                           # mini-batch大小
