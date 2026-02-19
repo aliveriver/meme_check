@@ -80,15 +80,18 @@ class MHKE_CLIP(nn.Module):
         self.path = config.chinese_clip_path
         self.model = ChineseCLIPModel.from_pretrained(self.path)
         
-        # 冻结底层参数
-        freeze_layers = getattr(config, 'freeze_layers', 10)
-        print(f"✓ MHKE_CLIP: 冻结前 {freeze_layers}/12 层")
-        freeze_clip_layers(self.model, freeze_layers)
+        # 可选冻结 (freeze_layers=0时全参数微调)
+        freeze_layers = getattr(config, 'freeze_layers', 0)
+        if freeze_layers > 0:
+            print(f"✓ MHKE_CLIP: 冻结前 {freeze_layers}/12 层")
+            freeze_clip_layers(self.model, freeze_layers)
+        else:
+            print(f"✓ MHKE_CLIP: 全参数微调 (低学习率防过拟合)")
         
         self.attention = QKVAttention()
         
-        # 带 Dropout 的分类头
-        clf_dropout = getattr(config, 'classifier_dropout', 0.3)
+        # 简单分类头 (与原始基线一致, 轻量 Dropout 防止分类头过拟合)
+        clf_dropout = getattr(config, 'classifier_dropout', 0.1)
         self.classifier = nn.Sequential(
             nn.Dropout(clf_dropout),
             nn.Linear(config.hidden_dim * 2, config.num_classes)
