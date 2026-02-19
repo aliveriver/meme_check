@@ -72,7 +72,14 @@ class Config_base(object):
         self.use_scheduler = True                                      # 是否使用学习率调度器
         self.warmup_ratio = 0.1                                        # 预热比例(占总步数)
         self.classifier_dropout = 0.1                                  # 分类头Dropout
-        self.use_ema = False                                           # 是否使用EMA (指数移动平均)
+
+        # ====== 高级正则化 ======
+        self.use_ema = True                                            # EMA 指数移动平均 (平滑权重, 提升泛化)
+        self.ema_decay = 0.999                                         # EMA 衰减率
+        self.use_fgm = True                                            # FGM 对抗训练 (embedding 扰动)
+        self.fgm_epsilon = 0.5                                         # FGM 扰动幅度 (0.5~1.0)
+        self.use_mixup = True                                          # Mixup 图像混合 (50%概率触发)
+        self.mixup_alpha = 0.2                                         # Mixup Beta分布参数 (越小越接近原样本)
 
         # train
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')   # 设备

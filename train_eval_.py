@@ -9,6 +9,7 @@ import torch.nn.functional as F
 import torch.optim as optim
 from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from tqdm import tqdm
+import copy
 
 import time
 import json
@@ -16,6 +17,79 @@ from dataset.dataset import get_time_dif, convert_onehot
 from model.clip import *
 from model.vit_roberta import *
 from model.MHKE import *
+
+
+# ====== EMA: 指数移动平均 ======
+class EMA:
+    """
+    Exponential Moving Average for model parameters.
+    维护模型参数的指数移动平均值，验证时使用平滑后的参数，
+    能有效提升泛化性能（相当于集成训练过程中多个模型）。
+    """
+    def __init__(self, model, decay=0.999):
+        self.model = model
+        self.decay = decay
+        self.shadow = {}  # 存储 EMA 参数
+        self.backup = {}  # 备份原始参数
+        self._register()
+    
+    def _register(self):
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.shadow[name] = param.data.clone()
+    
+    def update(self):
+        """每个 optimizer.step() 之后调用"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                new_average = (1.0 - self.decay) * param.data + self.decay * self.shadow[name]
+                self.shadow[name] = new_average.clone()
+    
+    def apply_shadow(self):
+        """验证前调用：用 EMA 参数替换模型参数"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                self.backup[name] = param.data.clone()
+                param.data = self.shadow[name]
+    
+    def restore(self):
+        """验证后调用：恢复原始参数继续训练"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                param.data = self.backup[name]
+        self.backup = {}
+
+
+# ====== FGM: Fast Gradient Method 对抗训练 ======
+class FGM:
+    """
+    Fast Gradient Method 对抗训练。
+    对 embedding 层的参数添加微小扰动，迫使模型在扰动后仍能做出正确预测，
+    显著增强模型鲁棒性和泛化能力。
+    """
+    def __init__(self, model, epsilon=1.0, emb_names=('embeddings',)):
+        self.model = model
+        self.epsilon = epsilon
+        self.emb_names = emb_names
+        self.backup = {}
+    
+    def attack(self):
+        """在 loss.backward() 之后调用，对 embedding 参数添加扰动"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and any(emb in name for emb in self.emb_names):
+                self.backup[name] = param.data.clone()
+                norm = torch.norm(param.grad)
+                if norm != 0 and not torch.isnan(norm):
+                    r_at = self.epsilon * param.grad / norm
+                    param.data.add_(r_at)
+    
+    def restore(self):
+        """对抗训练结束后调用，恢复原始 embedding 参数"""
+        for name, param in self.model.named_parameters():
+            if param.requires_grad and any(emb in name for emb in self.emb_names):
+                assert name in self.backup
+                param.data = self.backup[name]
+        self.backup = {}
 
 
 def get_parameter_groups(config, model):
@@ -130,6 +204,28 @@ def train(config, train_iter, dev_iter):
         print(f"✓ Label Smoothing = {label_smoothing}")
     loss_fn = nn.BCEWithLogitsLoss()
     
+    # ====== EMA: 指数移动平均 ======
+    ema = None
+    use_ema = getattr(config, 'use_ema', False)
+    if use_ema:
+        ema_decay = getattr(config, 'ema_decay', 0.999)
+        ema = EMA(model, decay=ema_decay)
+        print(f"✓ EMA enabled (decay={ema_decay})")
+    
+    # ====== FGM: 对抗训练 ======
+    fgm = None
+    use_fgm = getattr(config, 'use_fgm', False)
+    if use_fgm:
+        fgm_epsilon = getattr(config, 'fgm_epsilon', 1.0)
+        fgm = FGM(model, epsilon=fgm_epsilon)
+        print(f"✓ FGM adversarial training enabled (epsilon={fgm_epsilon})")
+    
+    # ====== Mixup ======
+    use_mixup = getattr(config, 'use_mixup', False)
+    mixup_alpha = getattr(config, 'mixup_alpha', 0.2)
+    if use_mixup:
+        print(f"✓ Mixup enabled (alpha={mixup_alpha})")
+    
     # R-Drop 正则化配置
     rdrop_alpha = getattr(config, 'rdrop_alpha', 0.5)
     use_rdrop = rdrop_alpha > 0
@@ -154,63 +250,92 @@ def train(config, train_iter, dev_iter):
         for batch in tqdm(train_iter, desc='Training', colour='MAGENTA'):
             model.zero_grad()
             
-            if use_rdrop:
-                # R-Drop: 两次前向传播（不同的 dropout mask）
-                logit1 = model(**batch).cpu()
-                logit2 = model(**batch).cpu()
-                
-                if config.task_name == "task_1":
-                    label = batch['label']
-                    pred = get_preds(config, logit1)
-                else:
-                    label = batch['type_label']
-                    pred = get_preds_task2(config, logit1)
-                
-                # Label Smoothing
-                if label_smoothing > 0:
-                    smoothed_label = label.float() * (1 - label_smoothing) + label_smoothing / label.size(-1)
-                else:
-                    smoothed_label = label.float()
-                
-                # 分类损失取平均
-                cls_loss = (loss_fn(logit1, smoothed_label) + loss_fn(logit2, smoothed_label)) / 2
-                
-                # KL 散度正则化（对称）
-                p1 = F.softmax(logit1, dim=-1)
-                p2 = F.softmax(logit2, dim=-1)
-                kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
-                           F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
-                
-                loss = cls_loss + rdrop_alpha * kl_loss
+            # 获取标签
+            if config.task_name == "task_1":
+                label = batch['label']
             else:
-                logit = model(**batch).cpu()
+                label = batch['type_label']
+            
+            # Label Smoothing
+            if label_smoothing > 0:
+                smoothed_label = label.float() * (1 - label_smoothing) + label_smoothing / label.size(-1)
+            else:
+                smoothed_label = label.float()
+            
+            # ====== Mixup: 对 batch 内样本做插值混合 ======
+            if use_mixup and np.random.random() < 0.5:  # 50% 概率使用 mixup
+                lam = np.random.beta(mixup_alpha, mixup_alpha)
+                batch_size_cur = label.size(0)
+                index = torch.randperm(batch_size_cur)
                 
-                if config.task_name == "task_1":
-                    label = batch['label']
-                    pred = get_preds(config, logit)
-                else:
-                    label = batch['type_label']
-                    pred = get_preds_task2(config, logit)
+                # 混合标签
+                mixed_label = lam * smoothed_label + (1 - lam) * smoothed_label[index]
                 
-                # Label Smoothing
-                if label_smoothing > 0:
-                    smoothed_label = label.float() * (1 - label_smoothing) + label_smoothing / label.size(-1)
+                # 混合输入：对文本 input_ids 不做混合（离散的），仅混合图像
+                mixed_batch = {k: v for k, v in batch.items()}
+                if 'image_tensor' in batch:
+                    mixed_batch['image_tensor'] = lam * batch['image_tensor'] + (1 - lam) * batch['image_tensor'][index]
+                
+                if use_rdrop:
+                    logit1 = model(**mixed_batch).cpu()
+                    logit2 = model(**mixed_batch).cpu()
+                    pred = get_preds(config, logit1) if config.task_name == "task_1" else get_preds_task2(config, logit1)
+                    cls_loss = (loss_fn(logit1, mixed_label) + loss_fn(logit2, mixed_label)) / 2
+                    p1 = F.softmax(logit1, dim=-1)
+                    p2 = F.softmax(logit2, dim=-1)
+                    kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
+                               F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
+                    loss = cls_loss + rdrop_alpha * kl_loss
                 else:
-                    smoothed_label = label.float()
-                    
-                loss = loss_fn(logit, smoothed_label)
+                    logit = model(**mixed_batch).cpu()
+                    pred = get_preds(config, logit) if config.task_name == "task_1" else get_preds_task2(config, logit)
+                    loss = loss_fn(logit, mixed_label)
+            else:
+                # ====== 标准前向传播 ======
+                if use_rdrop:
+                    logit1 = model(**batch).cpu()
+                    logit2 = model(**batch).cpu()
+                    pred = get_preds(config, logit1) if config.task_name == "task_1" else get_preds_task2(config, logit1)
+                    cls_loss = (loss_fn(logit1, smoothed_label) + loss_fn(logit2, smoothed_label)) / 2
+                    p1 = F.softmax(logit1, dim=-1)
+                    p2 = F.softmax(logit2, dim=-1)
+                    kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
+                               F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
+                    loss = cls_loss + rdrop_alpha * kl_loss
+                else:
+                    logit = model(**batch).cpu()
+                    pred = get_preds(config, logit) if config.task_name == "task_1" else get_preds_task2(config, logit)
+                    loss = loss_fn(logit, smoothed_label)
 
             preds.extend(pred)
             labels.extend(label.detach().numpy())
-
             loss_all += loss.item()
+            
+            # 反向传播
             model_optimizer.zero_grad()
             loss.backward()
             
-            # 梯度裁剪，防止梯度爆炸
+            # ====== FGM 对抗训练 ======
+            if fgm is not None:
+                fgm.attack()  # 在 embedding 上添加对抗扰动
+                # 对抗样本前向传播
+                if use_rdrop:
+                    adv_logit = model(**batch).cpu()
+                    adv_loss = loss_fn(adv_logit, smoothed_label)
+                else:
+                    adv_logit = model(**batch).cpu()
+                    adv_loss = loss_fn(adv_logit, smoothed_label)
+                adv_loss.backward()  # 累积对抗梯度
+                fgm.restore()  # 恢复 embedding
+            
+            # 梯度裁剪
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             model_optimizer.step()
+            
+            # EMA 更新
+            if ema is not None:
+                ema.update()
             
             # 更新学习率
             if scheduler is not None:
@@ -224,8 +349,18 @@ def train(config, train_iter, dev_iter):
         if epoch >= config.num_warm:
             trn_scores = get_scores(preds, labels, loss_all, len(
                 train_iter), data_name="TRAIN")
+            
+            # EMA: 验证时使用平滑参数
+            if ema is not None:
+                ema.apply_shadow()
+            
             dev_scores, _ = eval(config, model, loss_fn,
                                  dev_iter, data_name='DEV')
+            
+            # EMA: 验证后恢复原始参数
+            if ema is not None:
+                ema.restore()
+            
             f = open(
                 '{}/{}.all_scores.txt'.format(config.result_path, model_name), 'a')
             f.write(' ==================================================  Epoch: {}  ==================================================\n'.format(epoch))
@@ -238,11 +373,15 @@ def train(config, train_iter, dev_iter):
                 max_score = curr_score
                 best_epoch = epoch
                 no_improve_count = 0
-                # 保存最佳模型
+                # 保存最佳模型 (EMA 时保存平滑参数)
+                if ema is not None:
+                    ema.apply_shadow()
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': model.state_dict(),
                 }, '{}/ckp-{}-{}.tar'.format(config.checkpoint_path, model_name, 'BEST'))
+                if ema is not None:
+                    ema.restore()
                 print(f"✓ New best F1: {curr_score:.4f} at epoch {epoch}")
             else:
                 no_improve_count += 1
