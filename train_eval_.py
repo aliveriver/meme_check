@@ -7,6 +7,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR
 from tqdm import tqdm
 
 import time
@@ -15,6 +16,56 @@ from dataset.dataset import get_time_dif, convert_onehot
 from model.clip import *
 from model.vit_roberta import *
 from model.MHKE import *
+
+
+def get_parameter_groups(config, model):
+    """
+    将模型参数分为 backbone（低学习率）和 head（高学习率）两组。
+    backbone 包括预训练权重，head 包括分类头和新增模块。
+    同时对 backbone 施加更强的 weight_decay。
+    """
+    backbone_params = []
+    head_params = []
+    
+    backbone_keywords = ['model', 'cv_model', 'nlp_model', 'vision_model', 'text_model']
+    
+    for name, param in model.named_parameters():
+        if not param.requires_grad:
+            continue
+        
+        # 判断是否属于预训练 backbone
+        is_backbone = False
+        for kw in backbone_keywords:
+            if name.startswith(kw + '.'):
+                is_backbone = True
+                break
+        
+        if is_backbone:
+            backbone_params.append(param)
+        else:
+            head_params.append(param)
+    
+    backbone_lr = config.learning_rate * getattr(config, 'backbone_lr_scale', 0.1)
+    weight_decay = getattr(config, 'weight_decay', 0.01)
+    
+    print(f"  参数组: backbone {len(backbone_params)} 个张量 (lr={backbone_lr:.1e}, wd={weight_decay})")
+    print(f"  参数组: head     {len(head_params)} 个张量 (lr={config.learning_rate:.1e}, wd={weight_decay})")
+    
+    param_groups = [
+        {'params': backbone_params, 'lr': backbone_lr, 'weight_decay': weight_decay},
+        {'params': head_params, 'lr': config.learning_rate, 'weight_decay': weight_decay},
+    ]
+    return param_groups
+
+
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps):
+    """带 Warmup 的余弦退火学习率调度器"""
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * progress)))
+    return LambdaLR(optimizer, lr_lambda)
 
 
 def train(config, train_iter, dev_iter):
@@ -43,15 +94,40 @@ def train(config, train_iter, dev_iter):
 
     model_name = '{}_B-{}_E-{}_Lr-{}_w-{}_{}_add'.format(config.model_name, config.batch_size,
                                                          config.num_epochs, config.learning_rate, config.weight, config.task_name)
-    params = list(model.named_parameters())
+    
+    # ====== 打印模型参数统计 ======
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    frozen_params = total_params - trainable_params
+    print(f"\n{'='*60}")
+    print(f"模型参数统计:")
+    print(f"  总参数:   {total_params:>12,}")
+    print(f"  可训练:   {trainable_params:>12,} ({trainable_params/total_params*100:.1f}%)")
+    print(f"  已冻结:   {frozen_params:>12,} ({frozen_params/total_params*100:.1f}%)")
+    print(f"{'='*60}\n")
 
+    # ====== 优化器: 分层学习率 + Weight Decay ======
     if config.model_name == "resnet":
         model_optimizer = optim.Adam(
             model.parameters(), lr=config.learning_rate)
     else:
-        model_optimizer = optim.AdamW(
-            model.parameters(), lr=config.learning_rate)
+        param_groups = get_parameter_groups(config, model)
+        model_optimizer = optim.AdamW(param_groups)
+    
+    # ====== 学习率调度器: Cosine Warmup ======
+    scheduler = None
+    use_scheduler = getattr(config, 'use_scheduler', False)
+    if use_scheduler:
+        total_steps = config.num_epochs * len(train_iter)
+        warmup_ratio = getattr(config, 'warmup_ratio', 0.1)
+        warmup_steps = int(total_steps * warmup_ratio)
+        scheduler = get_cosine_schedule_with_warmup(model_optimizer, warmup_steps, total_steps)
+        print(f"✓ Cosine Warmup 调度器: warmup {warmup_steps}/{total_steps} steps")
 
+    # ====== 损失函数: Label Smoothing ======
+    label_smoothing = getattr(config, 'label_smoothing', 0.0)
+    if label_smoothing > 0:
+        print(f"✓ Label Smoothing = {label_smoothing}")
     loss_fn = nn.BCEWithLogitsLoss()
     
     # R-Drop 正则化配置
@@ -90,8 +166,14 @@ def train(config, train_iter, dev_iter):
                     label = batch['type_label']
                     pred = get_preds_task2(config, logit1)
                 
+                # Label Smoothing
+                if label_smoothing > 0:
+                    smoothed_label = label.float() * (1 - label_smoothing) + label_smoothing / label.size(-1)
+                else:
+                    smoothed_label = label.float()
+                
                 # 分类损失取平均
-                cls_loss = (loss_fn(logit1, label.float()) + loss_fn(logit2, label.float())) / 2
+                cls_loss = (loss_fn(logit1, smoothed_label) + loss_fn(logit2, smoothed_label)) / 2
                 
                 # KL 散度正则化（对称）
                 p1 = F.softmax(logit1, dim=-1)
@@ -109,7 +191,14 @@ def train(config, train_iter, dev_iter):
                 else:
                     label = batch['type_label']
                     pred = get_preds_task2(config, logit)
-                loss = loss_fn(logit, label.float())
+                
+                # Label Smoothing
+                if label_smoothing > 0:
+                    smoothed_label = label.float() * (1 - label_smoothing) + label_smoothing / label.size(-1)
+                else:
+                    smoothed_label = label.float()
+                    
+                loss = loss_fn(logit, smoothed_label)
 
             preds.extend(pred)
             labels.extend(label.detach().numpy())
@@ -117,7 +206,15 @@ def train(config, train_iter, dev_iter):
             loss_all += loss.item()
             model_optimizer.zero_grad()
             loss.backward()
+            
+            # 梯度裁剪，防止梯度爆炸
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            
             model_optimizer.step()
+            
+            # 更新学习率
+            if scheduler is not None:
+                scheduler.step()
 
         end_time = time.time()
         print(" took: {:.1f} min".format((end_time - start_time)/60.))

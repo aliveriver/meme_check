@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torchvision import models
 from transformers import BertModel, ViTModel
+from model.clip import freeze_bert_vit_layers
 
 
 class VitRobertaMemesClassifier(nn.Module):
@@ -11,7 +12,17 @@ class VitRobertaMemesClassifier(nn.Module):
         self.nlp_path = config.roberta_path
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
-        self.classifier = nn.Linear(config.hidden_dim*2, config.num_classes)
+        
+        # 冻结底层参数
+        freeze_layers = getattr(config, 'freeze_layers', 10)
+        print(f"✓ VitRoberta: 冻结前 {freeze_layers}/12 层")
+        freeze_bert_vit_layers(self.nlp_model, self.cv_model, freeze_layers)
+        
+        clf_dropout = getattr(config, 'classifier_dropout', 0.3)
+        self.classifier = nn.Sequential(
+            nn.Dropout(clf_dropout),
+            nn.Linear(config.hidden_dim * 2, config.num_classes)
+        )
         self.device = config.device
   
     def forward(self, **args):

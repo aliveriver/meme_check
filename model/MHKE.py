@@ -3,8 +3,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torchvision import models
-from transformers import BertModel, ViTModel
-from transformers import ChineseCLIPModel
+from transformers import BertModel, ViTModel, ChineseCLIPModel
+from model.clip import freeze_clip_layers, freeze_bert_vit_layers
 
 
 
@@ -15,9 +15,20 @@ class MHKE(nn.Module):
         self.nlp_path = config.chinese_roberta_path
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
-        # self.dropout = nn.Dropout(p=0.1)
+        
+        # 冻结底层参数
+        freeze_layers = getattr(config, 'freeze_layers', 10)
+        print(f"✓ MHKE: 冻结前 {freeze_layers}/12 层")
+        freeze_bert_vit_layers(self.nlp_model, self.cv_model, freeze_layers)
+        
         self.attention = QKVAttention()
-        self.classifier = nn.Linear(config.hidden_dim*2, config.num_classes)
+        
+        # 带 Dropout 的分类头
+        clf_dropout = getattr(config, 'classifier_dropout', 0.3)
+        self.classifier = nn.Sequential(
+            nn.Dropout(clf_dropout),
+            nn.Linear(config.hidden_dim * 2, config.num_classes)
+        )
         self.device = config.device
         self.weight = config.weight
 
@@ -68,8 +79,20 @@ class MHKE_CLIP(nn.Module):
         super().__init__()
         self.path = config.chinese_clip_path
         self.model = ChineseCLIPModel.from_pretrained(self.path)
+        
+        # 冻结底层参数
+        freeze_layers = getattr(config, 'freeze_layers', 10)
+        print(f"✓ MHKE_CLIP: 冻结前 {freeze_layers}/12 层")
+        freeze_clip_layers(self.model, freeze_layers)
+        
         self.attention = QKVAttention()
-        self.classifier = nn.Linear(config.hidden_dim*2, config.num_classes)
+        
+        # 带 Dropout 的分类头
+        clf_dropout = getattr(config, 'classifier_dropout', 0.3)
+        self.classifier = nn.Sequential(
+            nn.Dropout(clf_dropout),
+            nn.Linear(config.hidden_dim * 2, config.num_classes)
+        )
         self.device = config.device
 
     def forward(self, **args):
@@ -207,34 +230,15 @@ class MHKE_CrossAttention(nn.Module):
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
         
-        # 🧊 部分冻结：冻结底层，保留顶层可训练
-        freeze_layers = 8  # 冻结前 8 层（共 12 层），顶部 4 层可训练
-        
-        # 冻结 ViT embeddings 和底层
-        for param in self.cv_model.embeddings.parameters():
-            param.requires_grad = False
-        for i, layer in enumerate(self.cv_model.encoder.layer):
-            if i < freeze_layers:
-                for param in layer.parameters():
-                    param.requires_grad = False
-        
-        # 冻结 RoBERTa embeddings 和底层
-        for param in self.nlp_model.embeddings.parameters():
-            param.requires_grad = False
-        for i, layer in enumerate(self.nlp_model.encoder.layer):
-            if i < freeze_layers:
-                for param in layer.parameters():
-                    param.requires_grad = False
-        
-        # 统计可训练参数
-        trainable_params = sum(p.numel() for p in self.cv_model.parameters() if p.requires_grad)
-        trainable_params += sum(p.numel() for p in self.nlp_model.parameters() if p.requires_grad)
-        print(f"✓ Partial freezing: bottom {freeze_layers} layers frozen, top {12-freeze_layers} layers trainable")
-        print(f"  Trainable params in pretrained models: {trainable_params:,}")
+        # 使用统一冻结函数
+        freeze_layers = getattr(config, 'freeze_layers', 10)
+        print(f"✓ MHKE_CrossAttention: 冻结前 {freeze_layers}/12 层")
+        freeze_bert_vit_layers(self.nlp_model, self.cv_model, freeze_layers)
         
         # 序列级双向交叉注意力
-        self.text_to_image_attn = SequenceCrossAttention(config.hidden_dim, num_heads=8, dropout=0.2)
-        self.image_to_text_attn = SequenceCrossAttention(config.hidden_dim, num_heads=8, dropout=0.2)
+        clf_dropout = getattr(config, 'classifier_dropout', 0.3)
+        self.text_to_image_attn = SequenceCrossAttention(config.hidden_dim, num_heads=8, dropout=clf_dropout)
+        self.image_to_text_attn = SequenceCrossAttention(config.hidden_dim, num_heads=8, dropout=clf_dropout)
         
         # 融合层
         self.fusion_layer = nn.Sequential(
@@ -396,22 +400,10 @@ class MHKE_CrossAttention_V2(nn.Module):
         self.cv_model = ViTModel.from_pretrained(self.cv_path)
         self.nlp_model = BertModel.from_pretrained(self.nlp_path)
         
-        # 🧊 部分冻结
-        freeze_layers = 8
-        for param in self.cv_model.embeddings.parameters():
-            param.requires_grad = False
-        for i, layer in enumerate(self.cv_model.encoder.layer):
-            if i < freeze_layers:
-                for param in layer.parameters():
-                    param.requires_grad = False
-        for param in self.nlp_model.embeddings.parameters():
-            param.requires_grad = False
-        for i, layer in enumerate(self.nlp_model.encoder.layer):
-            if i < freeze_layers:
-                for param in layer.parameters():
-                    param.requires_grad = False
-        
-        print(f"✓ Partial freezing: bottom {freeze_layers} layers frozen")
+        # 使用统一冻结函数
+        freeze_layers = getattr(config, 'freeze_layers', 10)
+        print(f"✓ MHKE_CrossAttention_V2: 冻结前 {freeze_layers}/12 层")
+        freeze_bert_vit_layers(self.nlp_model, self.cv_model, freeze_layers)
         
         # 堆叠交叉注意力层 (2层)
         self.num_layers = 2
@@ -598,20 +590,10 @@ class MHKE_ISSUES(nn.Module):
         self.weight = config.weight
         self.training_stage = training_stage
         
-        # 🧊 冻结预训练模型的底层
-        freeze_layers = 8
-        for param in self.cv_model.embeddings.parameters():
-            param.requires_grad = False
-        for i, layer in enumerate(self.cv_model.encoder.layer):
-            if i < freeze_layers:
-                for param in layer.parameters():
-                    param.requires_grad = False
-        for param in self.nlp_model.embeddings.parameters():
-            param.requires_grad = False
-        for i, layer in enumerate(self.nlp_model.encoder.layer):
-            if i < freeze_layers:
-                for param in layer.parameters():
-                    param.requires_grad = False
+        # 使用统一冻结函数
+        freeze_layers = getattr(config, 'freeze_layers', 10)
+        print(f"✓ MHKE_ISSUES: 冻结前 {freeze_layers}/12 层")
+        freeze_bert_vit_layers(self.nlp_model, self.cv_model, freeze_layers)
         
         # ===== ISSUES 核心组件 =====
         
