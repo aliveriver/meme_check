@@ -262,6 +262,10 @@ def train(config, train_iter, dev_iter):
             else:
                 smoothed_label = label.float()
             
+            # ====== 确定当前 batch 和 label (统一管理 Mixup/非Mixup 路径) ======
+            current_batch = batch
+            current_label = smoothed_label
+            
             # ====== Mixup: 对 batch 内样本做插值混合 ======
             if use_mixup and np.random.random() < 0.5:  # 50% 概率使用 mixup
                 lam = np.random.beta(mixup_alpha, mixup_alpha)
@@ -269,43 +273,28 @@ def train(config, train_iter, dev_iter):
                 index = torch.randperm(batch_size_cur)
                 
                 # 混合标签
-                mixed_label = lam * smoothed_label + (1 - lam) * smoothed_label[index]
+                current_label = lam * smoothed_label + (1 - lam) * smoothed_label[index]
                 
                 # 混合输入：对文本 input_ids 不做混合（离散的），仅混合图像
-                mixed_batch = {k: v for k, v in batch.items()}
+                current_batch = {k: v for k, v in batch.items()}
                 if 'image_tensor' in batch:
-                    mixed_batch['image_tensor'] = lam * batch['image_tensor'] + (1 - lam) * batch['image_tensor'][index]
-                
-                if use_rdrop:
-                    logit1 = model(**mixed_batch).cpu()
-                    logit2 = model(**mixed_batch).cpu()
-                    pred = get_preds(config, logit1) if config.task_name == "task_1" else get_preds_task2(config, logit1)
-                    cls_loss = (loss_fn(logit1, mixed_label) + loss_fn(logit2, mixed_label)) / 2
-                    p1 = F.softmax(logit1, dim=-1)
-                    p2 = F.softmax(logit2, dim=-1)
-                    kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
-                               F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
-                    loss = cls_loss + rdrop_alpha * kl_loss
-                else:
-                    logit = model(**mixed_batch).cpu()
-                    pred = get_preds(config, logit) if config.task_name == "task_1" else get_preds_task2(config, logit)
-                    loss = loss_fn(logit, mixed_label)
+                    current_batch['image_tensor'] = lam * batch['image_tensor'] + (1 - lam) * batch['image_tensor'][index]
+            
+            # ====== 前向传播 ======
+            if use_rdrop:
+                logit1 = model(**current_batch).cpu()
+                logit2 = model(**current_batch).cpu()
+                pred = get_preds(config, logit1) if config.task_name == "task_1" else get_preds_task2(config, logit1)
+                cls_loss = (loss_fn(logit1, current_label) + loss_fn(logit2, current_label)) / 2
+                p1 = F.softmax(logit1, dim=-1)
+                p2 = F.softmax(logit2, dim=-1)
+                kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
+                           F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
+                loss = cls_loss + rdrop_alpha * kl_loss
             else:
-                # ====== 标准前向传播 ======
-                if use_rdrop:
-                    logit1 = model(**batch).cpu()
-                    logit2 = model(**batch).cpu()
-                    pred = get_preds(config, logit1) if config.task_name == "task_1" else get_preds_task2(config, logit1)
-                    cls_loss = (loss_fn(logit1, smoothed_label) + loss_fn(logit2, smoothed_label)) / 2
-                    p1 = F.softmax(logit1, dim=-1)
-                    p2 = F.softmax(logit2, dim=-1)
-                    kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
-                               F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
-                    loss = cls_loss + rdrop_alpha * kl_loss
-                else:
-                    logit = model(**batch).cpu()
-                    pred = get_preds(config, logit) if config.task_name == "task_1" else get_preds_task2(config, logit)
-                    loss = loss_fn(logit, smoothed_label)
+                logit = model(**current_batch).cpu()
+                pred = get_preds(config, logit) if config.task_name == "task_1" else get_preds_task2(config, logit)
+                loss = loss_fn(logit, current_label)
 
             preds.extend(pred)
             labels.extend(label.detach().numpy())
@@ -318,13 +307,9 @@ def train(config, train_iter, dev_iter):
             # ====== FGM 对抗训练 ======
             if fgm is not None:
                 fgm.attack()  # 在 embedding 上添加对抗扰动
-                # 对抗样本前向传播
-                if use_rdrop:
-                    adv_logit = model(**batch).cpu()
-                    adv_loss = loss_fn(adv_logit, smoothed_label)
-                else:
-                    adv_logit = model(**batch).cpu()
-                    adv_loss = loss_fn(adv_logit, smoothed_label)
+                # 对抗样本前向传播 (使用当前正确的 batch 和 label)
+                adv_logit = model(**current_batch).cpu()
+                adv_loss = loss_fn(adv_logit, current_label)
                 adv_loss.backward()  # 累积对抗梯度
                 fgm.restore()  # 恢复 embedding
             

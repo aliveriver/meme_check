@@ -56,10 +56,10 @@ class Config_base(object):
         self.pad_size = 64                                              # 每句话处理成的长度(短填长切)
 
         # R-Drop 正则化
-        self.rdrop_alpha = 0.5                                      # R-Drop KL 散度权重
+        self.rdrop_alpha = 0.0                                      # R-Drop KL 散度权重 (关闭: 与FGM功能重叠)
 
         # model
-        self.dropout = 0.5                                              # 随机失活
+        self.dropout = 0.3                                              # 随机失活 (从0.5降低, 避免欠拟合)
         self.fc_hidden_dim = 256
         self.weight = 0.5
 
@@ -77,8 +77,8 @@ class Config_base(object):
         self.use_ema = True                                            # EMA 指数移动平均 (平滑权重, 提升泛化)
         self.ema_decay = 0.999                                         # EMA 衰减率
         self.use_fgm = True                                            # FGM 对抗训练 (embedding 扰动)
-        self.fgm_epsilon = 0.5                                         # FGM 扰动幅度 (0.5~1.0)
-        self.use_mixup = True                                          # Mixup 图像混合 (50%概率触发)
+        self.fgm_epsilon = 1.0                                         # FGM 扰动幅度 (标准值)
+        self.use_mixup = False                                         # Mixup 关闭 (像素级混合对ViT有害)
         self.mixup_alpha = 0.2                                         # Mixup Beta分布参数 (越小越接近原样本)
 
         # train
