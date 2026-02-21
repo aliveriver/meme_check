@@ -92,8 +92,11 @@ def train(config, train_iter, dev_iter):
     elif config.model_name == "MHKE_ISSUES":
         model = MHKE_ISSUES(config).to(config.device)
 
+    exp_tag = getattr(config, 'exp_tag', '')
     model_name = '{}_B-{}_E-{}_Lr-{}_w-{}_{}_add'.format(config.model_name, config.batch_size,
                                                          config.num_epochs, config.learning_rate, config.weight, config.task_name)
+    if exp_tag:
+        model_name = f'{exp_tag}_{model_name}'
     
     # ====== 打印模型参数统计 ======
     total_params = sum(p.numel() for p in model.parameters())
@@ -176,8 +179,13 @@ def train(config, train_iter, dev_iter):
                 cls_loss = (loss_fn(logit1, smoothed_label) + loss_fn(logit2, smoothed_label)) / 2
                 
                 # KL 散度正则化（对称）
-                p1 = F.softmax(logit1, dim=-1)
-                p2 = F.softmax(logit2, dim=-1)
+                if getattr(config, 'rdrop_use_sigmoid', False):
+                    # sigmoid 模式：与 BCEWithLogitsLoss 语义一致
+                    p1 = torch.sigmoid(logit1)
+                    p2 = torch.sigmoid(logit2)
+                else:
+                    p1 = F.softmax(logit1, dim=-1)
+                    p2 = F.softmax(logit2, dim=-1)
                 kl_loss = (F.kl_div(p1.log(), p2, reduction='batchmean') + 
                            F.kl_div(p2.log(), p1, reduction='batchmean')) / 2
                 
@@ -208,7 +216,8 @@ def train(config, train_iter, dev_iter):
             loss.backward()
             
             # 梯度裁剪，防止梯度爆炸
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            if getattr(config, 'use_grad_clip', True):
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             model_optimizer.step()
             
@@ -259,6 +268,8 @@ def train(config, train_iter, dev_iter):
                 
             f.close()
         print("ALLTRAINED for {} epochs".format(epoch))
+    
+    return max_score, best_epoch
 
 
 def eval(config, model, loss_fn, dev_iter, data_name='DEV'):

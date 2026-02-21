@@ -18,7 +18,7 @@ from model.MHKE import *
 
 if __name__ == '__main__':
 
-    model_name = "MHKE_CrossAttention"
+    model_name = "clip"
     # model_name = "vit-roberta"
     task_name = "task_1"
     config = Config_base(model_name, task_name)
