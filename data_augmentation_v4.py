@@ -473,6 +473,7 @@ def process_dataset(
     logger.info(f"{'='*60}")
     logger.info(f"  输入: {input_path}")
     logger.info(f"  输出: {output_path}")
+    logger.info(f"  并发数: {max_workers}")
     logger.info(f"  多模态: {'是' if use_image else '否'}")
     logger.info(f"  温度: {TEMPERATURE}")
     logger.info(f"  最大 tokens: {MAX_TOKENS}")
@@ -507,23 +508,52 @@ def process_dataset(
     results = list(completed.values()) if resume else []
     start_time = time.time()
 
-    # 单线程处理
-    for i, item in pending_items:
-        result = process_single_item(i, item, total, use_image)
-        results.append(result)
+    if max_workers <= 1:
+        # 单线程处理
+        for i, item in pending_items:
+            result = process_single_item(i, item, total, use_image)
+            results.append(result)
 
-        current_count = len(results)
-        if current_count % 50 == 0 and current_count > 0:
-            logger.info(f"💾 正在保存断点 ({current_count}/{total})...")
-            save_checkpoint(results, checkpoint_path)
-            elapsed = time.time() - start_time
-            speed = current_count / elapsed if elapsed > 0 else 0
-            eta = (total - current_count) / speed if speed > 0 else 0
-            logger.info(
-                f"  速度: {speed:.1f} 条/秒, 预计剩余: {eta/60:.1f} 分钟"
-            )
+            current_count = len(results)
+            if current_count % 50 == 0 and current_count > 0:
+                logger.info(f"💾 正在保存断点 ({current_count}/{total})...")
+                save_checkpoint(results, checkpoint_path)
+                elapsed = time.time() - start_time
+                speed = current_count / elapsed if elapsed > 0 else 0
+                eta = (total - current_count) / speed if speed > 0 else 0
+                logger.info(
+                    f"  速度: {speed:.1f} 条/秒, 预计剩余: {eta/60:.1f} 分钟"
+                )
 
-        time.sleep(REQUEST_DELAY)
+            time.sleep(REQUEST_DELAY)
+    else:
+        # 多线程并发处理
+        logger.info(f"  🚀 使用 {max_workers} 线程并发处理")
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_idx = {
+                executor.submit(process_single_item, i, item, total, use_image): i
+                for i, item in pending_items
+            }
+            for future in as_completed(future_to_idx):
+                try:
+                    result = future.result()
+                    results.append(result)
+                except Exception as e:
+                    idx = future_to_idx[future]
+                    logger.error(f"[{idx+1}/{total}] 处理异常: {e}")
+                    # 保留原始数据
+                    results.append(dict(pending_items[idx][1]))
+
+                current_count = len(results)
+                if current_count % 50 == 0 and current_count > 0:
+                    logger.info(f"💾 正在保存断点 ({current_count}/{total})...")
+                    save_checkpoint(results, checkpoint_path)
+                    elapsed = time.time() - start_time
+                    speed = current_count / elapsed if elapsed > 0 else 0
+                    eta = (total - current_count) / speed if speed > 0 else 0
+                    logger.info(
+                        f"  速度: {speed:.1f} 条/秒, 预计剩余: {eta/60:.1f} 分钟"
+                    )
 
     # 按原始顺序排序
     path_key = "path" if "path" in data[0] else "new_path"
@@ -610,18 +640,23 @@ def parse_args():
         "--dry-run", action="store_true",
         help="试运行：仅处理前 3 条样本",
     )
+    parser.add_argument(
+        "--workers", type=int, default=MAX_WORKERS,
+        help=f"并发线程数 (default: {MAX_WORKERS}，建议 2-4)",
+    )
     return parser.parse_args()
 
 
 def main():
     args = parse_args()
 
-    global API_BASE, API_KEY, MODEL_NAME, TEMPERATURE, MAX_TOKENS
+    global API_BASE, API_KEY, MODEL_NAME, TEMPERATURE, MAX_TOKENS, MAX_WORKERS
     API_BASE = args.api_base
     API_KEY = args.api_key
     MODEL_NAME = args.model
     TEMPERATURE = args.temperature
     MAX_TOKENS = args.max_tokens
+    MAX_WORKERS = args.workers
 
     logger.info("=" * 60)
     logger.info("🤖 ToxiCN_MM V4 数据增强 - 高质量描述生成")
@@ -630,6 +665,7 @@ def main():
     logger.info(f"  模型: {MODEL_NAME}")
     logger.info(f"  温度: {TEMPERATURE}")
     logger.info(f"  最大 tokens: {MAX_TOKENS}")
+    logger.info(f"  并发数: {MAX_WORKERS}")
     logger.info(f"  多模态: {'是' if args.use_image else '否'}")
     logger.info(f"  断点续传: {'是' if args.resume else '否'}")
     logger.info("")
@@ -677,12 +713,14 @@ def main():
         process_dataset(
             TRAIN_INPUT, TRAIN_OUTPUT, "train",
             resume=args.resume, use_image=args.use_image,
+            max_workers=MAX_WORKERS,
         )
 
     if args.split in ("test", "all"):
         process_dataset(
             TEST_INPUT, TEST_OUTPUT, "test",
             resume=args.resume, use_image=args.use_image,
+            max_workers=MAX_WORKERS,
         )
 
     logger.info("\n🎉 V4 数据增强全部完成！")
