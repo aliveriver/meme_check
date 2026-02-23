@@ -37,9 +37,9 @@ class Config_base(object):
         # 数据路径（相对路径）
         data_dir = path.join(self.project_root, 'data')
         self.meme_path = path.join(data_dir, 'meme') + path.sep
-        self.train_path = path.join(data_dir, 'train_data_discription_3.0.json')
-        self.dev_path = path.join(data_dir, 'test_data_discription_3.0.json')
-        self.test_path = path.join(data_dir, 'test_data_discription_3.0.json')
+        self.train_path = path.join(data_dir, 'train_data_discription_4.0.json')
+        self.dev_path = path.join(data_dir, 'test_data_discription_4.0.json')
+        self.test_path = path.join(data_dir, 'test_data_discription_4.0.json')
         
         # 输出路径（相对路径）
         self.result_path = path.join(self.project_root, 'result')
@@ -53,7 +53,7 @@ class Config_base(object):
 
         # dataset
         self.seed = 1        
-        self.pad_size = 64                                              # 每句话处理成的长度(短填长切)
+        self.pad_size = 128                                             # V4数据描述更长，从64增加到128
 
         # R-Drop 正则化
         self.rdrop_alpha = 0.5                                      # R-Drop KL 散度权重
