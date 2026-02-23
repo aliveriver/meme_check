@@ -78,7 +78,7 @@ class Config_base(object):
         # train
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')   # 设备
         self.learning_rate = 1e-5                                       # 学习率
-        self.num_epochs = 10                                            # grad_clip最优在epoch 1, 10轮足够
+        self.num_epochs = 30                                            # grad_clip最优在epoch 1
         self.num_warm = 0                                              # 预热
         self.batch_size = 32                                           # mini-batch大小
         self.patience = 5                                              # Early stopping patience
