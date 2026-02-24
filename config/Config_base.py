@@ -55,7 +55,7 @@ class Config_base(object):
         self.seed = 1        
         self.pad_size = 128                                             # V4数据描述更长，从64增加到128
 
-        # R-Drop 正则化 (V4消融: sigmoid +0.11%, softmax +0.23%)
+        # R-Drop 正则化 (CLIP+V4消融: grad_clip_rdrop = 81.44% 🏆)
         self.rdrop_alpha = 0.5                                      # R-Drop KL 散度权重
         self.rdrop_use_sigmoid = True                               # sigmoid 模式 (与 BCE 语义一致)
 
@@ -64,22 +64,22 @@ class Config_base(object):
         self.fc_hidden_dim = 256
         self.weight = 0.5
 
-        # ====== 防过拟合配置 (V4消融最优: best_v3_combo = 81.09%) ======
+        # ====== 防过拟合配置 (CLIP+V4消融最优: grad_clip_rdrop = 81.44%) ======
         self.freeze_layers = 0                                         # 冻结预训练模型底部N层
         self.weight_decay = 0.01                                       # AdamW 权重衰减
-        self.label_smoothing = 0.1                                     # V4消融: +0.47%
-        self.use_augmentation = True                                   # V4消融: +0.20%
+        self.label_smoothing = 0                                       # CLIP消融: +0.76% 单项强, 但组合冗余
+        self.use_augmentation = False                                  # CLIP消融: -0.02%, 无效
         self.backbone_lr_scale = 1.0                                   # backbone学习率=learning_rate*1.0
-        self.use_scheduler = True                                      # V4消融: cosine_warmup
-        self.warmup_ratio = 0.1                                        # 预热比例 10%
-        self.classifier_dropout = 0.1                                  # V4消融: -0.06% (轻微负, 但组合有效)
+        self.use_scheduler = False                                     # CLIP消融: +0.74% 单项强, 但组合冗余
+        self.warmup_ratio = 0.1                                        # (scheduler关闭时不生效)
+        self.classifier_dropout = 0                                    # CLIP消融: +0.78% 单项强, 但组合冗余
         self.use_ema = False                                           # 是否使用EMA
-        self.use_grad_clip = True                                      # V4消融: +0.43%
+        self.use_grad_clip = True                                      # CLIP消融: 组合核心
 
         # train
         self.device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')   # 设备
         self.learning_rate = 1e-5                                       # 学习率
-        self.num_epochs = 20                                            # best_v3_combo 最优在 epoch 6
+        self.num_epochs = 20                                            # grad_clip_rdrop 最优在 epoch 1
         self.num_warm = 0                                              # 预热
         self.batch_size = 32                                           # mini-batch大小
         self.patience = 5                                              # Early stopping patience

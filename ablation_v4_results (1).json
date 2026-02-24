@@ -1,0 +1,141 @@
+[
+  {
+    "exp_name": "baseline",
+    "desc": "V4 数据无正则化基准 (应复现 ~80.67%)",
+    "best_f1": 0.8039836653054421,
+    "best_f1_pct": "80.40%",
+    "best_epoch": 3,
+    "elapsed_min": 37.0,
+    "overrides": {
+      "num_epochs": 10
+    }
+  },
+  {
+    "exp_name": "grad_clip",
+    "desc": "梯度裁剪 (max_norm=1.0)",
+    "best_f1": 0.8044080986961367,
+    "best_f1_pct": "80.44%",
+    "best_epoch": 6,
+    "elapsed_min": 37.0,
+    "overrides": {
+      "use_grad_clip": true,
+      "num_epochs": 10
+    }
+  },
+  {
+    "exp_name": "rdrop_sigmoid",
+    "desc": "R-Drop (α=0.5, sigmoid KL, 修复版)",
+    "best_f1": 0.8040397442415631,
+    "best_f1_pct": "80.40%",
+    "best_epoch": 7,
+    "elapsed_min": 65.6,
+    "overrides": {
+      "rdrop_alpha": 0.5,
+      "rdrop_use_sigmoid": true,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "rdrop_softmax",
+    "desc": "R-Drop (α=0.5, softmax KL, 原版)",
+    "best_f1": 0.8056161966565987,
+    "best_f1_pct": "80.56%",
+    "best_epoch": 5,
+    "elapsed_min": 55.8,
+    "overrides": {
+      "rdrop_alpha": 0.5,
+      "rdrop_use_sigmoid": false,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "label_smoothing",
+    "desc": "Label Smoothing (ε=0.1)",
+    "best_f1": 0.8116467246994913,
+    "best_f1_pct": "81.16%",
+    "best_epoch": 2,
+    "elapsed_min": 29.1,
+    "overrides": {
+      "label_smoothing": 0.1,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "augmentation",
+    "desc": "图像增强 (RandomCrop + ColorJitter + Flip + Rotation)",
+    "best_f1": 0.8037670447304703,
+    "best_f1_pct": "80.38%",
+    "best_epoch": 7,
+    "elapsed_min": 44.7,
+    "overrides": {
+      "use_augmentation": true,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "cosine_warmup",
+    "desc": "Cosine Warmup LR 调度器 (warmup 10%)",
+    "best_f1": 0.8113580647323146,
+    "best_f1_pct": "81.14%",
+    "best_epoch": 9,
+    "elapsed_min": 54.8,
+    "overrides": {
+      "use_scheduler": true,
+      "warmup_ratio": 0.1,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "clf_dropout",
+    "desc": "分类头 Dropout (p=0.1)",
+    "best_f1": 0.8118313811555142,
+    "best_f1_pct": "81.18%",
+    "best_epoch": 1,
+    "elapsed_min": 25.6,
+    "overrides": {
+      "classifier_dropout": 0.1,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "grad_clip_rdrop",
+    "desc": "梯度裁剪 + R-Drop sigmoid (V3最优组合在V4上测试)",
+    "best_f1": 0.8143582948834955,
+    "best_f1_pct": "81.44%",
+    "best_epoch": 1,
+    "elapsed_min": 34.9,
+    "overrides": {
+      "use_grad_clip": true,
+      "rdrop_alpha": 0.5,
+      "rdrop_use_sigmoid": true,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  },
+  {
+    "exp_name": "best_v3_combo",
+    "desc": "V3 最优配置: all_fixed (全部正则化 + sigmoid 修复)",
+    "best_f1": 0.8140939700738139,
+    "best_f1_pct": "81.41%",
+    "best_epoch": 8,
+    "elapsed_min": 67.6,
+    "overrides": {
+      "rdrop_alpha": 0.5,
+      "rdrop_use_sigmoid": true,
+      "label_smoothing": 0.1,
+      "use_augmentation": true,
+      "use_scheduler": true,
+      "warmup_ratio": 0.1,
+      "classifier_dropout": 0.1,
+      "use_grad_clip": true,
+      "num_epochs": 20,
+      "patience": 5
+    }
+  }
+]
