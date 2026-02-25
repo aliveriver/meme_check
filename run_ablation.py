@@ -1,13 +1,20 @@
 """
-消融实验脚本 V2 (Ablation Study - V4 Data)
-==========================================
-基准: main 分支 + V4 数据 + 无正则化 = 80.67% F1
-目标: 在 V4 数据基础上逐项测试各技术的贡献
+消融实验脚本 V3 (Ablation Study - V4 Data, CLIP Model)
+======================================================
+模型: MHKE_CLIP (ChineseCLIP, model_name="clip")
+基准: V4 数据 + 无正则化
+目标: 在 V4 数据 + CLIP 模型基础上, 测试有效技术的贡献
+
+已移除的无效实验 (基于 V2 结果):
+  - grad_clip 单独: +0.04% (微乎其微)
+  - rdrop_sigmoid:   +0.01% (无提升)
+  - rdrop_softmax:   +0.16% (微小)
+  - augmentation:    -0.02% (负效果)
 
 用法:
     python run_ablation.py --all                   # 运行全部实验
     python run_ablation.py --exp baseline           # 运行单个实验
-    python run_ablation.py --exp grad_clip rdrop_sigmoid  # 运行多个实验
+    python run_ablation.py --exp label_smoothing clf_dropout  # 运行多个实验
     python run_ablation.py --list                  # 列出所有实验
 """
 
@@ -20,56 +27,31 @@ import argparse
 from datetime import datetime
 
 # ============================================================
-# 实验定义
+# 全局配置
+# ============================================================
+MODEL_NAME = "clip"          # 使用 MHKE_CLIP (ChineseCLIP) 模型
+TASK_NAME = "task_1"
+DEFAULT_BATCH_SIZE = 32      # 默认 batch_size
+RDROP_BATCH_SIZE = 32        # R-Drop 需要双前向, 降低 batch_size 防 OOM
+
+# ============================================================
+# 实验定义 (仅保留有效实验)
 # ============================================================
 
 EXPERIMENTS = {
     # ====== 基线 ======
     "baseline": {
-        "desc": "V4 数据无正则化基准 (应复现 ~80.67%)",
+        "desc": "V4 数据 + CLIP 无正则化基准",
         "overrides": {
             "num_epochs": 10,
         },
     },
 
-    # ====== 单项消融 ======
-    "grad_clip": {
-        "desc": "梯度裁剪 (max_norm=1.0)",
-        "overrides": {
-            "use_grad_clip": True,
-            "num_epochs": 10,
-        },
-    },
-    "rdrop_sigmoid": {
-        "desc": "R-Drop (α=0.5, sigmoid KL, 修复版)",
-        "overrides": {
-            "rdrop_alpha": 0.5,
-            "rdrop_use_sigmoid": True,
-            "num_epochs": 20,
-            "patience": 5,
-        },
-    },
-    "rdrop_softmax": {
-        "desc": "R-Drop (α=0.5, softmax KL, 原版)",
-        "overrides": {
-            "rdrop_alpha": 0.5,
-            "rdrop_use_sigmoid": False,
-            "num_epochs": 20,
-            "patience": 5,
-        },
-    },
+    # ====== 单项消融 (仅保留 V2 中 >+0.5% 的技术) ======
     "label_smoothing": {
         "desc": "Label Smoothing (ε=0.1)",
         "overrides": {
             "label_smoothing": 0.1,
-            "num_epochs": 20,
-            "patience": 5,
-        },
-    },
-    "augmentation": {
-        "desc": "图像增强 (RandomCrop + ColorJitter + Flip + Rotation)",
-        "overrides": {
-            "use_augmentation": True,
             "num_epochs": 20,
             "patience": 5,
         },
@@ -94,26 +76,28 @@ EXPERIMENTS = {
 
     # ====== 组合实验 ======
     "grad_clip_rdrop": {
-        "desc": "梯度裁剪 + R-Drop sigmoid (V3最优组合在V4上测试)",
+        "desc": "梯度裁剪 + R-Drop sigmoid (V2最优组合)",
         "overrides": {
             "use_grad_clip": True,
             "rdrop_alpha": 0.5,
             "rdrop_use_sigmoid": True,
+            "batch_size": RDROP_BATCH_SIZE,   # R-Drop 双前向, 防 OOM
             "num_epochs": 20,
             "patience": 5,
         },
     },
     "best_v3_combo": {
-        "desc": "V3 最优配置: all_fixed (全部正则化 + sigmoid 修复)",
+        "desc": "全部正则化组合 (label_smooth + scheduler + dropout + grad_clip + rdrop)",
         "overrides": {
             "rdrop_alpha": 0.5,
             "rdrop_use_sigmoid": True,
             "label_smoothing": 0.1,
-            "use_augmentation": True,
+            "use_augmentation": False,         # V2 证实无效, 不再启用
             "use_scheduler": True,
             "warmup_ratio": 0.1,
             "classifier_dropout": 0.1,
             "use_grad_clip": True,
+            "batch_size": RDROP_BATCH_SIZE,   # R-Drop 双前向, 防 OOM
             "num_epochs": 20,
             "patience": 5,
         },
@@ -123,11 +107,7 @@ EXPERIMENTS = {
 # 实验运行顺序
 EXPERIMENT_ORDER = [
     "baseline",
-    "grad_clip",
-    "rdrop_sigmoid",
-    "rdrop_softmax",
     "label_smoothing",
-    "augmentation",
     "cosine_warmup",
     "clf_dropout",
     "grad_clip_rdrop",
@@ -136,7 +116,7 @@ EXPERIMENT_ORDER = [
 
 
 # ============================================================
-# 消融实验基线配置 (V4 数据, 无正则化)
+# 消融实验基线配置 (V4 数据, CLIP 模型, 无正则化)
 # ============================================================
 
 def get_baseline_config():
@@ -154,6 +134,7 @@ def get_baseline_config():
         "num_epochs": 10,
         "patience": 999,   # baseline 不 early stop
         "pad_size": 128,    # V4 数据需要 128
+        "batch_size": DEFAULT_BATCH_SIZE,
     }
 
 
@@ -192,6 +173,7 @@ def run_experiment(exp_name, exp_config, logger):
     from dataset.dataset import MemeDataset
     from torch.utils.data import DataLoader
     from train_eval_ import train
+    import torch
 
     logger.info(f"\n{'='*70}")
     logger.info(f"实验: {exp_name}")
@@ -199,8 +181,8 @@ def run_experiment(exp_name, exp_config, logger):
     logger.info(f"覆盖参数: {json.dumps(exp_config['overrides'], ensure_ascii=False)}")
     logger.info(f"{'='*70}")
 
-    # 创建配置
-    config = Config_base(model_name="MHKE", task_name="task_1")
+    # 创建配置 — 使用 CLIP 模型
+    config = Config_base(model_name=MODEL_NAME, task_name=TASK_NAME)
 
     # 应用基线配置 (所有正则化关闭)
     baseline = get_baseline_config()
@@ -214,11 +196,19 @@ def run_experiment(exp_name, exp_config, logger):
     # 添加实验标签
     config.exp_tag = f"ablv4_{exp_name}"
 
-    # 打印关键配置
+    # ====== 详细日志: 模型 & 配置 ======
+    logger.info(f"模型: {config.model_name} (train_eval_ 分发 → "
+                f"{'MHKE_CLIP (ChineseCLIP)' if config.model_name == 'clip' else 'MHKE (ViT+RoBERTa)'})")
+    logger.info(f"batch_size: {config.batch_size}")
+    use_rdrop = getattr(config, 'rdrop_alpha', 0) > 0
+    if use_rdrop:
+        logger.info(f"⚠ R-Drop 启用 → 双前向传播, 等效显存 batch={config.batch_size * 2}")
+
     logger.info("关键配置:")
-    for key in ["num_epochs", "patience", "pad_size", "rdrop_alpha", "rdrop_use_sigmoid",
-                 "label_smoothing", "use_augmentation", "use_scheduler",
-                 "classifier_dropout", "use_grad_clip", "weight_decay"]:
+    for key in ["model_name", "num_epochs", "patience", "pad_size", "batch_size",
+                 "learning_rate", "weight_decay", "rdrop_alpha", "rdrop_use_sigmoid",
+                 "label_smoothing", "use_augmentation", "use_scheduler", "warmup_ratio",
+                 "classifier_dropout", "use_grad_clip", "freeze_layers"]:
         val = getattr(config, key, "N/A")
         logger.info(f"  {key}={val}")
 
@@ -233,20 +223,33 @@ def run_experiment(exp_name, exp_config, logger):
         dev_dataset, batch_size=config.batch_size, shuffle=False, num_workers=0
     )
     logger.info(f"训练集: {len(train_dataset)} 样本, 测试集: {len(dev_dataset)} 样本")
+    logger.info(f"训练 steps/epoch: {len(train_loader)}, 验证 steps/epoch: {len(dev_loader)}")
+
+    # 打印模型参数统计 (捕获 train() 内部的 print 输出)
+    if torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
 
     # 训练
     start_time = time.time()
     max_score, best_epoch = train(config, train_loader, dev_loader)
     elapsed = (time.time() - start_time) / 60.0
 
+    # 记录显存峰值
+    peak_mem = ""
+    if torch.cuda.is_available():
+        peak_gb = torch.cuda.max_memory_allocated() / (1024**3)
+        peak_mem = f", 显存峰值: {peak_gb:.2f} GiB"
+
     logger.info(f"\n实验 [{exp_name}] 完成!")
+    logger.info(f"  模型: {config.model_name}")
     logger.info(f"  最优 F1: {max_score*100:.2f}%")
     logger.info(f"  最优 Epoch: {best_epoch}")
-    logger.info(f"  耗时: {elapsed:.1f} 分钟")
+    logger.info(f"  耗时: {elapsed:.1f} 分钟{peak_mem}")
 
     return {
         "exp_name": exp_name,
         "desc": exp_config["desc"],
+        "model_name": config.model_name,
         "best_f1": max_score,
         "best_f1_pct": f"{max_score*100:.2f}%",
         "best_epoch": best_epoch,
@@ -270,7 +273,7 @@ def save_results(results, result_dir, logger):
 def print_summary(results, logger):
     """打印实验汇总表"""
     logger.info(f"\n\n{'='*70}")
-    logger.info("消融实验汇总 (V4 数据)")
+    logger.info(f"消融实验汇总 (V4 数据, 模型: {MODEL_NAME})")
     logger.info(f"{'='*70}")
 
     # 按 F1 排序
@@ -338,14 +341,18 @@ def main():
                 return
 
     logger, result_dir = setup_logging()
-    logger.info("消融实验开始 (V4 数据)")
+    logger.info(f"消融实验开始 (V4 数据, 模型: {MODEL_NAME})")
+    logger.info(f"模型分发: {MODEL_NAME} → {'MHKE_CLIP (ChineseCLIP)' if MODEL_NAME == 'clip' else 'MHKE (ViT+RoBERTa)'}")
+    logger.info(f"默认 batch_size: {DEFAULT_BATCH_SIZE}, R-Drop batch_size: {RDROP_BATCH_SIZE}")
     logger.info(f"计划运行 {len(exp_names)} 个实验: {', '.join(exp_names)}")
 
     # 打印 GPU 信息
     try:
         import torch
         if torch.cuda.is_available():
-            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            gpu_name = torch.cuda.get_device_name(0)
+            gpu_mem = torch.cuda.get_device_properties(0).total_mem / (1024**3)
+            logger.info(f"GPU: {gpu_name} ({gpu_mem:.1f} GiB)")
     except Exception:
         pass
 
@@ -364,6 +371,7 @@ def main():
             results.append({
                 "exp_name": exp_name,
                 "desc": EXPERIMENTS[exp_name]["desc"],
+                "model_name": MODEL_NAME,
                 "best_f1": 0,
                 "best_f1_pct": "FAILED",
                 "best_epoch": -1,
