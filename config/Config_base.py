@@ -81,7 +81,7 @@ class Config_base(object):
         self.learning_rate = 1e-5                                       # 学习率
         self.num_epochs = 20                                            # grad_clip_rdrop 最优在 epoch 1
         self.num_warm = 0                                              # 预热
-        self.batch_size = 32                                           # mini-batch大小
+        self.batch_size = 16                                           # R-Drop双前向需16防OOM (消融实验实测值)
         self.patience = 5                                              # Early stopping patience
 
         # evaluate

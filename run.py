@@ -35,7 +35,7 @@ if __name__ == '__main__':
     print('The size of the Training dataset: {}'.format(len(trn_data)))
     print('The size of the Test dataset: {}'.format(len(test_data)))
 
-    train_iter = DataLoader(trn_data, batch_size=int(config.batch_size), shuffle=False)
+    train_iter = DataLoader(trn_data, batch_size=int(config.batch_size), shuffle=True)
     test_iter = DataLoader(test_data, batch_size=int(config.batch_size), shuffle=False)
 
     train(config, train_iter, test_iter)
