@@ -31,38 +31,37 @@ class MHKE(nn.Module):
         )
         self.device = config.device
         self.weight = config.weight
+        
+        # 知识增强模式：full / no_knowledge / text_desc_only / meme_desc_only
+        self.knowledge_mode = getattr(config, 'knowledge_mode', 'full')
+        print(f"✓ MHKE knowledge_mode: {self.knowledge_mode}")
 
     def forward(self, **args):
         text_outputs = self.nlp_model(input_ids=args['input_ids'].to(self.device),
                                       attention_mask=args['attention_mask'].to(self.device))
-        text_discription_outputs = self.nlp_model(input_ids=args['text_discription_input_ids'].to(self.device),
-                                                  attention_mask=args['text_discription_attention_mask'].to(self.device))
-        meme_discription_outputs = self.nlp_model(input_ids=args['meme_discription_input_ids'].to(self.device),
-                                                  attention_mask=args['meme_discription_attention_mask'].to(self.device))
 
-        # text_features = self.dropout(text_outputs['pooler_output'])
-        # text_discription_features = self.dropout(
-        #     text_discription_outputs['pooler_output'])
-        # meme_discription_features = self.dropout(
-        #     meme_discription_outputs['pooler_output'])
-
-        # text_with_k_s = self.attention(text_outputs['pooler_output'],
-        #                                text_discription_outputs['pooler_output'], text_outputs['pooler_output'])[0]
-        # text_with_k_v = self.attention(text_outputs['pooler_output'],
-        #                                meme_discription_outputs['pooler_output'], text_outputs['pooler_output'])[0]
-
-        # text_with_k = torch.mean(torch.stack(
-        #     [text_outputs['pooler_output'], text_with_k_s]), dim=0)
-        text_with_k = text_outputs['pooler_output'] + \
-            self.weight * meme_discription_outputs['pooler_output'] + text_discription_outputs['pooler_output']
-
-        # text_with_k = text_outputs['pooler_output'] + \
-        #     text_discription_outputs['pooler_output']
-        # text_with_k = text_outputs['pooler_output'] + \
-        #     meme_discription_outputs['pooler_output']
-        # text_with_k = text_outputs['pooler_output'] + \
-        #     text_discription_outputs['pooler_output'] + \
-        #     meme_discription_outputs['pooler_output']
+        # 根据 knowledge_mode 决定知识增强方式
+        if self.knowledge_mode == 'no_knowledge':
+            # 无知识增强，仅使用原始文本
+            text_with_k = text_outputs['pooler_output']
+        elif self.knowledge_mode == 'text_desc_only':
+            # 仅文本描述
+            text_discription_outputs = self.nlp_model(input_ids=args['text_discription_input_ids'].to(self.device),
+                                                      attention_mask=args['text_discription_attention_mask'].to(self.device))
+            text_with_k = text_outputs['pooler_output'] + text_discription_outputs['pooler_output']
+        elif self.knowledge_mode == 'meme_desc_only':
+            # 仅模因描述
+            meme_discription_outputs = self.nlp_model(input_ids=args['meme_discription_input_ids'].to(self.device),
+                                                      attention_mask=args['meme_discription_attention_mask'].to(self.device))
+            text_with_k = text_outputs['pooler_output'] + self.weight * meme_discription_outputs['pooler_output']
+        else:
+            # full: 完整知识增强（默认）
+            text_discription_outputs = self.nlp_model(input_ids=args['text_discription_input_ids'].to(self.device),
+                                                      attention_mask=args['text_discription_attention_mask'].to(self.device))
+            meme_discription_outputs = self.nlp_model(input_ids=args['meme_discription_input_ids'].to(self.device),
+                                                      attention_mask=args['meme_discription_attention_mask'].to(self.device))
+            text_with_k = text_outputs['pooler_output'] + \
+                self.weight * meme_discription_outputs['pooler_output'] + text_discription_outputs['pooler_output']
 
         image_outputs = self.cv_model(
             pixel_values=args['image_tensor'].to(self.device))
