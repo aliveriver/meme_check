@@ -1,7 +1,7 @@
 """
 MHKE 消融实验脚本 (Ablation Study)
 ====================================
-模型: MHKE (ViT+RoBERTa + 知识增强)
+模型: MHKE_CLIP (ChineseCLIP + 知识增强)
 数据: V4 (data_discription_4.0)
 Seed: 2026
 
@@ -26,10 +26,10 @@ from datetime import datetime
 # ============================================================
 # 全局配置
 # ============================================================
-MODEL_NAME = "MHKE"          # 使用 MHKE (ViT+RoBERTa) 模型
+MODEL_NAME = "clip"          # 使用 MHKE_CLIP (ChineseCLIP) 模型
 TASK_NAME = "task_1"
 SEED = 2026
-DEFAULT_BATCH_SIZE = 16      # MHKE 默认 batch_size
+DEFAULT_BATCH_SIZE = 16      # MHKE_CLIP 默认 batch_size
 RDROP_BATCH_SIZE = 16        # R-Drop 双前向, 防 OOM
 
 # ============================================================
@@ -37,7 +37,7 @@ RDROP_BATCH_SIZE = 16        # R-Drop 双前向, 防 OOM
 # ============================================================
 
 def get_baseline_config():
-    """返回 MHKE 基线配置 (无正则化, 完整知识)"""
+    """返回 MHKE_CLIP 基线配置 (无正则化, 完整知识)"""
     return {
         # 防过拟合参数全部关闭
         "rdrop_alpha": 0,
@@ -73,7 +73,7 @@ EXPERIMENTS = {
         "overrides": {},
     },
     "no_knowledge": {
-        "desc": "去除全部知识增强 (退化为 ViT+RoBERTa)",
+        "desc": "去除全部知识增强 (退化为纯 ChineseCLIP)",
         "category": "知识增强",
         "overrides": {
             "knowledge_mode": "no_knowledge",
@@ -256,7 +256,7 @@ def run_experiment(exp_name, exp_config, logger):
     # 重设随机种子
     set_seed(SEED)
 
-    # 创建配置 — 使用 MHKE 模型
+    # 创建配置 — 使用 MHKE_CLIP 模型
     config = Config_base(model_name=MODEL_NAME, task_name=TASK_NAME)
     config.seed = SEED
 
@@ -270,10 +270,10 @@ def run_experiment(exp_name, exp_config, logger):
         setattr(config, key, value)
 
     # 添加实验标签
-    config.exp_tag = f"ablmhke_{exp_name}"
+    config.exp_tag = f"ablmhke_clip_{exp_name}"
 
     # ====== 详细日志 ======
-    logger.info(f"模型: MHKE (ViT+RoBERTa)")
+    logger.info(f"模型: MHKE_CLIP (ChineseCLIP)")
     logger.info(f"知识模式: {getattr(config, 'knowledge_mode', 'full')}")
     logger.info(f"batch_size: {config.batch_size}")
     use_rdrop = getattr(config, 'rdrop_alpha', 0) > 0
@@ -369,7 +369,7 @@ def save_results(results, result_dir, logger):
 def print_summary(results, logger):
     """打印实验汇总表 (分类别)"""
     logger.info(f"\n\n{'='*90}")
-    logger.info(f"  📊 MHKE 消融实验汇总  (seed={SEED}, dataset=V4)")
+    logger.info(f"  📊 MHKE_CLIP 消融实验汇总  (seed={SEED}, dataset=V4)")
     logger.info(f"{'='*90}")
 
     # 获取 baseline F1
@@ -427,7 +427,7 @@ def print_summary(results, logger):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="MHKE 消融实验 (知识增强 + 防过拟合, seed=2026, V4)"
+        description="MHKE_CLIP 消融实验 (知识增强 + 防过拟合, seed=2026, V4)"
     )
     parser.add_argument("--all", action="store_true", help="运行全部实验")
     parser.add_argument("--exp", nargs="+", help="运行指定实验")
@@ -461,8 +461,8 @@ def main():
     logger, result_dir = setup_logging()
 
     logger.info(f"{'#'*70}")
-    logger.info(f"#  MHKE 消融实验")
-    logger.info(f"#  模型:    MHKE (ViT+RoBERTa + 知识增强)")
+    logger.info(f"#  MHKE_CLIP 消融实验")
+    logger.info(f"#  模型:    MHKE_CLIP (ChineseCLIP + 知识增强)")
     logger.info(f"#  Seed:    {SEED}")
     logger.info(f"#  数据集:  V4 (data_discription_4.0)")
     logger.info(f"#  任务:    {TASK_NAME}")
