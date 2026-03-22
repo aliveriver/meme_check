@@ -27,7 +27,7 @@ from datetime import datetime
 # 全局配置
 # ============================================================
 MODEL_NAME = "clip"          # 使用 MHKE_CLIP (ChineseCLIP) 模型
-TASK_NAME = "task_1"
+DEFAULT_TASK_NAME = "task_1"
 SEED = 2026
 DEFAULT_BATCH_SIZE = 16      # MHKE_CLIP 默认 batch_size
 RDROP_BATCH_SIZE = 16        # R-Drop 双前向, 防 OOM
@@ -239,7 +239,7 @@ def set_seed(seed):
 # 运行单个实验
 # ============================================================
 
-def run_experiment(exp_name, exp_config, logger):
+def run_experiment(exp_name, exp_config, task_name, logger):
     """运行单个消融实验"""
     from config.Config_base import Config_base
     from dataset.dataset import MemeDataset
@@ -257,7 +257,7 @@ def run_experiment(exp_name, exp_config, logger):
     set_seed(SEED)
 
     # 创建配置 — 使用 MHKE_CLIP 模型
-    config = Config_base(model_name=MODEL_NAME, task_name=TASK_NAME)
+    config = Config_base(model_name=MODEL_NAME, task_name=task_name)
     config.seed = SEED
 
     # 应用基线配置 (所有正则化关闭)
@@ -270,7 +270,7 @@ def run_experiment(exp_name, exp_config, logger):
         setattr(config, key, value)
 
     # 添加实验标签
-    config.exp_tag = f"ablmhke_clip_{exp_name}"
+    config.exp_tag = f"ablmhke_{task_name}_clip_{exp_name}"
 
     # ====== 详细日志 ======
     logger.info(f"模型: MHKE_CLIP (ChineseCLIP)")
@@ -342,19 +342,19 @@ def run_experiment(exp_name, exp_config, logger):
 # 结果保存与汇总
 # ============================================================
 
-def save_results(results, result_dir, logger):
+def save_results(results, result_dir, task_name, logger):
     """保存结果到 JSON"""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    result_file = os.path.join(result_dir, f"ablation_mhke_results_{timestamp}.json")
+    result_file = os.path.join(result_dir, f"ablation_mhke_{task_name}_results_{timestamp}.json")
     # 同时也写一份固定名称的最新结果
-    latest_file = os.path.join(result_dir, "ablation_mhke_results_latest.json")
+    latest_file = os.path.join(result_dir, f"ablation_mhke_{task_name}_results_latest.json")
 
     output = {
         "experiment": "mhke_ablation",
         "model": MODEL_NAME,
         "seed": SEED,
         "dataset": "V4 (data_discription_4.0)",
-        "task": TASK_NAME,
+        "task": task_name,
         "timestamp": datetime.now().isoformat(),
         "results": results,
     }
@@ -366,10 +366,10 @@ def save_results(results, result_dir, logger):
     logger.info(f"结果已保存到: {result_file}")
 
 
-def print_summary(results, logger):
+def print_summary(results, task_name, logger):
     """打印实验汇总表 (分类别)"""
     logger.info(f"\n\n{'='*90}")
-    logger.info(f"  📊 MHKE_CLIP 消融实验汇总  (seed={SEED}, dataset=V4)")
+    logger.info(f"  📊 MHKE_CLIP 消融实验汇总  (seed={SEED}, dataset=V4, task={task_name})")
     logger.info(f"{'='*90}")
 
     # 获取 baseline F1
@@ -432,6 +432,8 @@ def main():
     parser.add_argument("--all", action="store_true", help="运行全部实验")
     parser.add_argument("--exp", nargs="+", help="运行指定实验")
     parser.add_argument("--list", action="store_true", help="列出所有可用实验")
+    parser.add_argument("--task", default=DEFAULT_TASK_NAME, choices=["task_1", "task_2"],
+                        help="任务类型 (default: task_1)")
     args = parser.parse_args()
 
     if args.list:
@@ -465,7 +467,7 @@ def main():
     logger.info(f"#  模型:    MHKE_CLIP (ChineseCLIP + 知识增强)")
     logger.info(f"#  Seed:    {SEED}")
     logger.info(f"#  数据集:  V4 (data_discription_4.0)")
-    logger.info(f"#  任务:    {TASK_NAME}")
+    logger.info(f"#  任务:    {args.task}")
     logger.info(f"#  实验数:  {len(exp_names)}")
     logger.info(f"#  实验:    {', '.join(exp_names)}")
     logger.info(f"{'#'*70}\n")
@@ -485,9 +487,9 @@ def main():
     for idx, exp_name in enumerate(exp_names):
         logger.info(f"\n>>> 进度: [{idx+1}/{len(exp_names)}] 即将训练: {exp_name}")
         try:
-            result = run_experiment(exp_name, EXPERIMENTS[exp_name], logger)
+            result = run_experiment(exp_name, EXPERIMENTS[exp_name], args.task, logger)
             results.append(result)
-            save_results(results, result_dir, logger)
+            save_results(results, result_dir, args.task, logger)
         except Exception as e:
             logger.error(f"实验 [{exp_name}] 失败: {e}")
             import traceback
@@ -506,10 +508,10 @@ def main():
                 "overrides": EXPERIMENTS[exp_name]["overrides"],
                 "error": str(e),
             })
-            save_results(results, result_dir, logger)
+            save_results(results, result_dir, args.task, logger)
 
     # 打印汇总
-    print_summary(results, logger)
+    print_summary(results, args.task, logger)
     logger.info(f"全部完成! 结果保存至: {result_dir}")
 
 

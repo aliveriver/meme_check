@@ -81,7 +81,7 @@ def build_config(model_name, task_name="task_1"):
         config.hidden_dim = 768
 
     # 为对比实验打标签，避免覆盖其他训练的 checkpoint
-    config.exp_tag = f"cmp_s{SEED}"
+    config.exp_tag = f"cmp_{task_name}_s{SEED}"
 
     return config
 
@@ -257,7 +257,7 @@ def main():
         output_path = args.output
     else:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        output_path = os.path.join("result", f"comparison_seed{SEED}_{timestamp}.json")
+        output_path = os.path.join("result", f"comparison_{args.task}_seed{SEED}_{timestamp}.json")
 
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
 
